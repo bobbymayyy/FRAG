@@ -9,12 +9,13 @@ name = "frag"
 # (plugin.json deliberately has no `version` field), so bumping this does
 # not affect what users receive. Bump it for human bookkeeping alongside
 # CHANGELOG.md entries.
-version = "0.1.0"
+version = "0.1.1"
 description = "Fragment Retrieval and Generation - minimal-context code retrieval over GitHub and Gitea"
 requires-python = ">=3.11"
-dependencies = [
-    "fastmcp",
-]
+# The baseline plugin runtime is stdlib-only. In particular, MCP startup must
+# not require a PyPI download because Claude Code may launch plugins inside a
+# network-restricted sandbox. Optional retrieval accelerators remain extras.
+dependencies = []
 
 [project.optional-dependencies]
 semantic = ["sentence-transformers"]

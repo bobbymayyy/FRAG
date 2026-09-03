@@ -1,142 +1,209 @@
 # FRAG plugin marketplace
 
 Claude Code plugin that bundles the FRAG MCP server and a retrieval skill.
+FRAG indexes GitHub and Gitea repositories and returns only the source
+fragments relevant to a symptom or question instead of pushing an entire
+codebase into the model context.
 
 ## Install
 
-Two commands, no script needed:
+From the GitHub marketplace:
 
 ```bash
-# From GitHub (shorthand; pin with @tag)
-claude plugin marketplace add <owner>/FRAG
+claude plugin marketplace add bobbymayyy/FRAG
 claude plugin install frag@frag
+```
 
-# From Gitea (full git URL; pin with #tag)
-claude plugin marketplace add https://gitea.example.com/<owner>/FRAG.git
+The repository default branch is `latest`, so the shorthand above follows
+that track. To pin a branch or tag, add a ref:
+
+```bash
+claude plugin marketplace add bobbymayyy/FRAG@stable
+```
+
+For a Gitea mirror or another full git URL, use the URL form and `#<ref>`:
+
+```bash
+claude plugin marketplace add https://gitea.example.com/<owner>/FRAG.git#stable
 claude plugin install frag@frag
 ```
 
 ### Or use the installer
 
-`install.sh` wraps those two commands and adds preflight checks, so a missing
-`python3-venv` or an unsupported Python version fails with a clear message
-instead of halfway through the plugin's first run. It's idempotent, so
-re-running it updates rather than erroring.
+`install.sh` wraps marketplace add/update plus plugin install and performs a
+small prerequisite check. It is idempotent, so running it again updates the
+registered marketplace rather than failing because it already exists.
 
 ```bash
-git clone https://github.com/<owner>/FRAG.git
+git clone https://github.com/bobbymayyy/FRAG.git
 cd FRAG
 ./install.sh
 ```
 
-Options: `--ref v1.2.0` to pin, `--source gitea` for the mirror, `--url` for
-an explicit repo, `--scope project` to share via the repo's settings, and
-`--uninstall`.
+Options include `--ref <branch-or-tag>`, `--source gitea`, `--url <git-url>`,
+`--scope user|project|local`, and `--uninstall`.
 
-The script never accepts tokens as arguments. Passing a PAT on a command line
-puts it in shell history and the process list; Claude Code prompts for the
-sensitive fields at enable time and stores them in the OS keychain instead.
+FRAG requires Python 3.11 or newer and the `git` CLI. It does **not** require
+`python3-venv`, pip, FastMCP, or a first-run dependency download.
 
-**On `curl | bash`:** the installer is short and readable, and cloning the
-repo first (as above) lets you read it before running it. If you'd rather
-pipe it straight from a raw URL, pin to a tag rather than a branch so the
-bytes you audited are the bytes you run.
+## MCP startup and sandboxing
 
-To pin to a branch or tag, append `#<ref>` to the git URL:
+The MCP server is intentionally dependency-free at baseline. Claude Code
+starts:
+
+```text
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/frag-server
+```
+
+The launcher prepends the plugin's bundled `src/` directory to `PYTHONPATH`
+and execs `frag.mcp_server` with the same interpreter. It does not create a
+venv and it never invokes pip. That matters when Claude Code is running with
+bubblewrap or another network-restricted sandbox: the MCP server can come
+online without contacting PyPI.
+
+`scripts/frag-server` also keeps stdout completely reserved for MCP JSON-RPC.
+Any launcher diagnostics go to stderr so they cannot corrupt the protocol.
+
+The server implements the small stdio MCP surface FRAG needs directly:
+`initialize`, `ping`, `tools/list`, and `tools/call`. The advertised tools are:
+
+- `frag_search` - sync/index a repo and return the most relevant fragments
+- `frag_resolve` - sync/index without searching
+- `frag_status` - inspect an existing local index without a network sync
+
+FRAG intentionally remains on the 2025-era MCP lifecycle for now. A client
+that first probes a stdio server with the 2026 `server/discover` method gets
+JSON-RPC `-32601 Method not found`, which tells compatible clients to fall back
+to the legacy `initialize` flow. FRAG negotiates only the protocol revisions
+it actually implements instead of echoing an arbitrary future version.
+
+## User configuration
+
+The plugin declares these `userConfig` values:
+
+- `github_token`
+- `github_default_owner`
+- `gitea_url`
+- `gitea_token`
+- `gitea_default_owner`
+
+The two token fields are marked `sensitive`, so Claude Code stores them in its
+credential storage instead of plaintext plugin settings.
+
+The MCP launch configuration itself does **not** interpolate
+`${user_config.*}` values. Claude Code exports configured plugin options as
+`CLAUDE_PLUGIN_OPTION_<KEY>` environment variables, and `frag-server` maps
+those into FRAG's internal environment after the process has already spawned.
+This makes configuration independent from process startup: leaving all five
+values blank does not prevent the MCP server from connecting. A host operation
+that needs missing credentials fails when that operation is called instead.
+
+For example, after install this should report a connected server even before
+host credentials are configured:
 
 ```bash
-claude plugin marketplace add https://gitea.example.com/<owner>/FRAG.git#stable
+claude mcp list
 ```
 
-On enable, Claude Code prompts for the tokens declared in `userConfig`. The
-two marked `sensitive` go to the OS keychain (or `~/.claude/.credentials.json`
-where no keychain exists), not into `settings.json` in plaintext.
+## Persistent data
 
-The first session after install builds a Python venv in the plugin's
-persistent data directory and installs the bundled source into it. That takes
-a few seconds; subsequent sessions skip it.
+`${CLAUDE_PLUGIN_ROOT}` is version-scoped and changes when the plugin updates.
+`${CLAUDE_PLUGIN_DATA}` persists across updates, so `.mcp.json` sets:
 
-## Why a plugin and not a skill
-
-A skill is a Markdown instruction file. It can tell Claude *how* to approach
-something, but it cannot provide tools. FRAG is an MCP server — it needs to
-run as a process and expose `frag_search`, `frag_resolve`, and `frag_status`.
-
-A plugin is the container that holds both: it declares the MCP server in
-`.mcp.json` *and* ships `skills/frag-retrieval/SKILL.md`, which teaches
-Claude when to reach for `frag_search` instead of reading files wholesale.
-The tools without the skill get ignored; the skill without the tools has
-nothing to call.
-
-## Why `version` is omitted from plugin.json
-
-Deliberate. Claude Code resolves a plugin's version from the first source
-that is set, and `plugin.json`'s `version` field is first in that order. If
-it were set, users would only receive an update when the field was bumped by
-hand — pushing new commits would have no effect and `/plugin update` would
-report "already at the latest version".
-
-With the field omitted, the version resolves from the source's **git commit
-SHA**, so every push to `stable` is a new version. This is the documented
-approach for internal plugins under active development, and it's what makes
-"push to stable, get it next session" work without a publish step.
-
-The trade-off: there is no publish step to fail safely. Whatever lands on
-`stable` is what sessions pick up. That's why `.gitea/workflows/validate-stable.yml`
-runs the full test suite, the MCP handshake check, and manifest validation —
-that gate is the only thing between a bad commit and every session.
-
-## Why the venv lives in the data directory
-
-`${CLAUDE_PLUGIN_ROOT}` is version-scoped: it changes on every plugin update,
-and the previous directory is swept roughly 14 days later. `${CLAUDE_PLUGIN_DATA}`
-persists across updates.
-
-This matters most for `FRAG_HOME`, which is set to `${CLAUDE_PLUGIN_DATA}/home`
-in `.mcp.json`. Repo clones and SQLite indexes live there. Had they been left
-under the plugin root, **every push to `stable` would wipe every repo index**
-and force a full re-clone and re-index on the next session.
-
-`scripts/frag-server` does the venv setup inline rather than from a
-`SessionStart` hook, so there's no dependency on hook-vs-server startup
-ordering — the venv is ready before the server starts because that script
-*is* the server's start. It reinstalls only when a hash of the bundled source
-changes, so the steady-state cost is one hash of a small tree.
-
-## Layout
-
+```text
+FRAG_HOME=${CLAUDE_PLUGIN_DATA}/home
 ```
-.claude-plugin/marketplace.json     catalog
+
+Repository clones and SQLite indexes therefore survive plugin updates. The
+runtime source remains in the versioned plugin cache; only state belongs in
+the persistent data directory.
+
+## Why a plugin and not only a skill
+
+A skill is Markdown guidance. It can teach Claude when and how to retrieve
+code, but it cannot expose tools. FRAG needs a running MCP process for
+`frag_search`, `frag_resolve`, and `frag_status`.
+
+The plugin is the container for both pieces:
+
+```text
+.claude-plugin/marketplace.json     marketplace catalog
 plugins/frag/
-  .claude-plugin/plugin.json        manifest + userConfig (token prompts)
+  .claude-plugin/plugin.json        manifest + userConfig
   .mcp.json                         MCP server registration
-  scripts/frag-server               ensure venv, exec server
-  skills/frag-retrieval/SKILL.md    when to use frag_search
-  src/                              the FRAG Python package + tests
+  scripts/frag-server               dependency-free launcher
+  skills/frag-retrieval/SKILL.md    retrieval guidance
+  src/                              FRAG Python package + tests
 ```
+
+## Versioning and branches
+
+`plugins/frag/.claude-plugin/plugin.json` deliberately omits a `version`
+field. Claude Code therefore resolves the effective plugin version from the
+git commit SHA instead of waiting for a manually bumped manifest version. The
+Python package version in `pyproject.toml` is only human bookkeeping.
+
+Claude's validator reports the missing semver as a **warning**, even though
+commit-SHA versioning is supported for git marketplaces. Normal
+`claude plugin validate` passes that layout; `--strict` turns the intentional
+warning into an error. FRAG therefore uses normal canonical validation in CI
+and separately enforces its own manifest invariants in pytest, including that
+the plugin version remains absent.
+
+Both `latest` and `stable` are CI-gated. `latest` is the repository default
+and development track; `stable` can be explicitly pinned for a release-oriented
+install. A pull request into either branch runs the same Python tests,
+marketplace-launch MCP handshake, plugin/marketplace validation, and installer
+linting where supported.
+
+## CI startup regression test
+
+The MCP smoke test intentionally exercises the production launch path instead
+of importing `frag.mcp_server` directly:
+
+1. CI creates a brand-new Python venv.
+2. Nothing from FRAG or an MCP framework is installed into it.
+3. `PIP_NO_INDEX=1` disables package downloads.
+4. The test starts `plugins/frag/scripts/frag-server`.
+5. It verifies the modern `server/discover` fallback.
+6. It starts a fresh process, completes MCP `initialize` + `tools/list`, and
+   verifies all three tools.
+
+That catches failures in the launcher, Python path setup, protocol framing,
+unconfigured `userConfig`, accidental runtime dependency additions, and
+protocol-negotiation regressions.
 
 ## Local development
 
 ```bash
-claude --plugin-dir ./plugins/frag      # load without installing
-claude plugin validate ./plugins/frag --strict
-claude plugin validate . --strict       # the catalog
-/reload-plugins                          # after changing .mcp.json or scripts
+# Load directly without installing
+claude --plugin-dir ./plugins/frag
+
+# Python tests
+cd plugins/frag/src
+python -m pip install -e '.[dev]'
+pytest -q
+python handshake_check.py
+
+# Plugin validation. The expected no-version warning is intentional.
+cd ../../..
+claude plugin validate ./plugins/frag
+claude plugin validate .
 ```
 
-Editing `SKILL.md` takes effect immediately in the current session. Changes
-to `.mcp.json`, `scripts/`, or `src/` need `/reload-plugins` or a restart.
+Changes to `.mcp.json`, `scripts/`, or `src/` require a plugin reload or a new
+Claude Code session. Editing the skill content itself can be picked up without
+rebuilding a Python environment because there is no runtime package install.
 
-## Status
+## Troubleshooting
 
-Verified in the build sandbox: all three manifests parse, the skill's
-frontmatter parses with `name` and `description`, the source fingerprint is
-deterministic and changes when source changes (so updates trigger a
-reinstall), and `python -m venv` succeeds.
+If the server shows failed:
 
-**Not verified** (no network egress in the build environment): the actual
-`pip install` of the bundled source, `claude plugin validate`, adding the
-marketplace from a live Gitea URL, and any real `git clone` against
-GitHub/Gitea. The offline install attempt failed only at build-dependency
-download, which is the expected offline failure and not a defect in the
-mechanism.
+```bash
+claude mcp list
+claude --debug mcp
+```
+
+`frag-server` writes fatal launcher errors to stderr with a `[frag-server]`
+prefix. Once the server connects, repository-specific authentication or clone
+errors are tool-call errors rather than MCP startup failures.
