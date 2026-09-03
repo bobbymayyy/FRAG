@@ -11,10 +11,12 @@ module is exec'd with the same Python interpreter Claude used to start this
 script. Repo clones and indexes still live in CLAUDE_PLUGIN_DATA so they
 persist across plugin updates.
 
-Claude Code may leave optional userConfig substitutions empty or, depending
-on client/version, pass the literal ``${user_config.foo}`` placeholder. Those
-values are scrubbed here so an unconfigured host fails clearly when its tool
-is called rather than being handed a fake credential.
+User configuration is read from Claude Code's documented
+``CLAUDE_PLUGIN_OPTION_<KEY>`` environment variables. Keeping
+``${user_config.*}`` references out of .mcp.json means an empty or buggy
+configuration substitution cannot prevent the MCP process from spawning.
+For compatibility with older FRAG installs, direct FRAG_* values are still
+accepted and literal unresolved placeholders are discarded.
 
 stdout is reserved for MCP JSON-RPC framing. Diagnostics go to stderr.
 """
@@ -26,13 +28,13 @@ import sys
 from pathlib import Path
 
 
-OPTIONAL_CONFIG_ENV = (
-    "FRAG_GITHUB_TOKEN",
-    "FRAG_GITHUB_DEFAULT_OWNER",
-    "FRAG_GITEA_URL",
-    "FRAG_GITEA_TOKEN",
-    "FRAG_GITEA_DEFAULT_OWNER",
-)
+USER_CONFIG_ENV = {
+    "FRAG_GITHUB_TOKEN": "CLAUDE_PLUGIN_OPTION_GITHUB_TOKEN",
+    "FRAG_GITHUB_DEFAULT_OWNER": "CLAUDE_PLUGIN_OPTION_GITHUB_DEFAULT_OWNER",
+    "FRAG_GITEA_URL": "CLAUDE_PLUGIN_OPTION_GITEA_URL",
+    "FRAG_GITEA_TOKEN": "CLAUDE_PLUGIN_OPTION_GITEA_TOKEN",
+    "FRAG_GITEA_DEFAULT_OWNER": "CLAUDE_PLUGIN_OPTION_GITEA_DEFAULT_OWNER",
+}
 
 
 def log(msg: str) -> None:
@@ -46,17 +48,32 @@ def resolved_path(value: str | None, fallback: Path) -> Path:
     return Path(value).expanduser()
 
 
-def sanitize_optional_config(env: dict[str, str]) -> None:
-    """Drop optional config values that Claude did not actually substitute."""
-    for key in OPTIONAL_CONFIG_ENV:
-        value = env.get(key)
-        if value is None:
-            continue
-        stripped = value.strip()
-        if not stripped or (
-            stripped.startswith("${user_config.") and stripped.endswith("}")
-        ):
-            env.pop(key, None)
+def configured_value(value: str | None) -> str | None:
+    """Return a real configured value, never an empty/literal placeholder."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped or (stripped.startswith("${") and stripped.endswith("}")):
+        return None
+    return stripped
+
+
+def apply_user_config(env: dict[str, str]) -> None:
+    """Normalize Claude plugin options into FRAG's internal environment."""
+    for target, option_env in USER_CONFIG_ENV.items():
+        direct = configured_value(env.get(target))
+        option = configured_value(env.get(option_env))
+
+        if direct is not None:
+            env[target] = direct
+        elif option is not None:
+            env[target] = option
+        else:
+            env.pop(target, None)
+
+        # The child only needs FRAG's normalized variable. Avoid retaining a
+        # second copy of sensitive values in its environment.
+        env.pop(option_env, None)
 
 
 def main() -> int:
@@ -73,7 +90,7 @@ def main() -> int:
         return 1
 
     env = os.environ.copy()
-    sanitize_optional_config(env)
+    apply_user_config(env)
 
     env["FRAG_PLUGIN_ROOT"] = str(root)
     env["FRAG_PLUGIN_DATA"] = str(data)
