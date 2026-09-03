@@ -158,7 +158,10 @@ def resolve_index_ref(ref_text: str) -> RepoRef:
         )
     host, owner, repo = parsed
 
-    local = acquire_local(host, owner, repo, frag_home=_frag_home(), source="worktree")
+    try:
+        local = acquire_local(host, owner, repo, frag_home=_frag_home(), source="worktree")
+    except (FileNotFoundError, RuntimeError):
+        local = None
     if local is not None:
         return local.ref
 
