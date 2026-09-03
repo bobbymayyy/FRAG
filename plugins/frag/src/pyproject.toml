@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frag"
+# This version is informational only. FRAG is distributed as a Claude Code
+# plugin, and the plugin's version is resolved from the git commit SHA
+# (plugin.json deliberately has no `version` field), so bumping this does
+# not affect what users receive. Bump it for human bookkeeping alongside
+# CHANGELOG.md entries.
+version = "0.1.0"
+description = "Fragment Retrieval and Generation - minimal-context code retrieval over GitHub and Gitea"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp",
+]
+
+[project.optional-dependencies]
+semantic = ["sentence-transformers"]
+symbols = ["tree-sitter", "tree-sitter-language-pack"]
+ann = ["sqlite-vec"]
+full = ["sentence-transformers", "tree-sitter", "tree-sitter-language-pack", "sqlite-vec"]
+dev = ["pytest"]
+
+[project.scripts]
+frag-mcp = "frag.mcp_server:main"
+
+[tool.setuptools.packages.find]
+include = ["frag*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

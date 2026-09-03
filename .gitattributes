@@ -1,0 +1,11 @@
+* text=auto
+
+# These are executed by bash and by python3 respectively. A CRLF checkout on
+# Windows breaks both: bash fails with a confusing "bad interpreter: \r" and
+# the plugin's MCP server never starts. Force LF regardless of platform.
+*.sh text eol=lf
+plugins/frag/scripts/frag-server text eol=lf
+
+# Keep JSON manifests LF too; some tooling is picky about them.
+*.json text eol=lf
+*.yml text eol=lf

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Test / tooling
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# FRAG runtime artifacts. These live in the plugin data directory in normal
+# operation, but a local dev run with FRAG_HOME unset writes them to ~/.frag;
+# these patterns catch the case where someone points FRAG_HOME at the repo.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.frag/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

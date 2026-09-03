@@ -1,0 +1,48 @@
+# Gate for push to `stable`.
+#
+# With commit-SHA plugin versioning, whatever lands on `stable` is what users
+# get on their next session -- there is no separate publish step to fail
+# safely. That makes this gate the ONLY thing standing between a bad commit
+# and every session picking it up, so it runs the full suite plus the MCP
+# handshake plus manifest validation.
+name: validate-stable
+
+on:
+  push:
+    branches: [stable]
+  pull_request:
+    branches: [stable]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install FRAG
+        working-directory: plugins/frag/src
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Unit tests
+        working-directory: plugins/frag/src
+        run: pytest -q
+
+      - name: MCP handshake smoke test
+        working-directory: plugins/frag/src
+        run: python handshake_check.py
+
+      # Catches a malformed plugin.json / marketplace.json before it reaches
+      # anyone's session. --strict promotes unrecognized-field warnings to
+      # errors, which catches a misspelled or leftover manifest key. Note
+      # this means plugin.json must stay free of hand-written comment keys.
+      - name: Validate plugin manifest
+        run: npx --yes @anthropic-ai/claude-code plugin validate ./plugins/frag --strict
+
+      - name: Validate marketplace catalog
+        run: npx --yes @anthropic-ai/claude-code plugin validate . --strict

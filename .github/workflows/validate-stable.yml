@@ -1,0 +1,57 @@
+# Gate for push to `stable`.
+#
+# The plugin's version resolves from the git commit SHA (plugin.json has no
+# `version` field), so whatever lands on `stable` is what sessions pick up on
+# their next start. There is no publish step that could fail safely in
+# between. That makes this workflow the only thing standing between a bad
+# commit and every installed session, so it runs the full suite, a real MCP
+# handshake, and manifest validation.
+name: validate-stable
+
+on:
+  push:
+    branches: [stable, main]
+  pull_request:
+    branches: [stable, main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install FRAG
+        working-directory: plugins/frag/src
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Unit tests
+        working-directory: plugins/frag/src
+        run: pytest -q
+
+      # Spawns the server and completes initialize + tools/list. This is the
+      # same contract a real Claude Code session exercises at startup, so a
+      # server that imports fine but can't speak MCP fails here rather than
+      # silently on someone's machine.
+      - name: MCP handshake smoke test
+        working-directory: plugins/frag/src
+        run: python handshake_check.py
+
+      # --strict promotes unrecognized-field warnings to errors, catching a
+      # misspelled or leftover manifest key. plugin.json must therefore stay
+      # free of hand-written comment keys.
+      - name: Validate plugin manifest
+        run: npx --yes @anthropic-ai/claude-code plugin validate ./plugins/frag --strict
+
+      - name: Validate marketplace catalog
+        run: npx --yes @anthropic-ai/claude-code plugin validate . --strict
+
+      - name: Shellcheck the installer
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck install.sh

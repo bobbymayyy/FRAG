@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "frag",
+  "displayName": "FRAG",
+  "description": "Fragment Retrieval and Generation. Indexes GitHub and Gitea repos and returns the smallest set of code fragments relevant to a symptom report, instead of sending the whole codebase.",
+  "author": {
+    "name": "Nathan"
+  },
+  "license": "MIT",
+  "keywords": ["rag", "code-search", "github", "gitea", "retrieval"],
+  "userConfig": {
+    "github_token": {
+      "type": "string",
+      "title": "GitHub token",
+      "description": "PAT with repo:read for the GitHub repositories FRAG should index.",
+      "sensitive": true
+    },
+    "github_default_owner": {
+      "type": "string",
+      "title": "GitHub default owner",
+      "description": "Owner assumed when a reference omits it, e.g. 'github/CERBERUS-2.0'. Leave blank to always require an explicit owner."
+    },
+    "gitea_url": {
+      "type": "string",
+      "title": "Gitea URL",
+      "description": "Base URL of your Gitea instance, e.g. https://gitea.example.com"
+    },
+    "gitea_token": {
+      "type": "string",
+      "title": "Gitea token",
+      "description": "Gitea access token with repository read access.",
+      "sensitive": true
+    },
+    "gitea_default_owner": {
+      "type": "string",
+      "title": "Gitea default owner",
+      "description": "Owner assumed when a Gitea reference omits it. Leave blank to always require an explicit owner."
+    }
+  }
+}
