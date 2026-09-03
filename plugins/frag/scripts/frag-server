@@ -1,24 +1,14 @@
 #!/usr/bin/env python3
-"""
-Claude Code plugin entry point for FRAG.
+"""Claude Code plugin entry point for FRAG.
 
 The launcher is intentionally dependency-free. It does not create a venv or
 run pip: MCP startup may happen inside Claude Code's sandbox with no PyPI
 access, and a server should not need network access merely to come online.
 
-Instead, the bundled ``src`` directory is prepended to PYTHONPATH and the MCP
-module is exec'd with the same Python interpreter Claude used to start this
-script. Repo clones and indexes still live in CLAUDE_PLUGIN_DATA so they
-persist across plugin updates.
-
-User configuration is read from Claude Code's documented
-``CLAUDE_PLUGIN_OPTION_<KEY>`` environment variables. Keeping
-``${user_config.*}`` references out of .mcp.json means an empty or buggy
-configuration substitution cannot prevent the MCP process from spawning.
-For compatibility with older FRAG installs, direct FRAG_* values are still
-accepted and literal unresolved placeholders are discarded.
-
-stdout is reserved for MCP JSON-RPC framing. Diagnostics go to stderr.
+User configuration is read from Claude Code's
+``CLAUDE_PLUGIN_OPTION_<KEY>`` environment variables and normalized into
+FRAG_* variables after process spawn. FRAG_REPO_HUB is optional; when absent,
+the runtime auto-detects /srv/repos if that directory exists.
 """
 
 from __future__ import annotations
@@ -34,6 +24,7 @@ USER_CONFIG_ENV = {
     "FRAG_GITEA_URL": "CLAUDE_PLUGIN_OPTION_GITEA_URL",
     "FRAG_GITEA_TOKEN": "CLAUDE_PLUGIN_OPTION_GITEA_TOKEN",
     "FRAG_GITEA_DEFAULT_OWNER": "CLAUDE_PLUGIN_OPTION_GITEA_DEFAULT_OWNER",
+    "FRAG_REPO_HUB": "CLAUDE_PLUGIN_OPTION_REPO_HUB",
 }
 
 
@@ -42,14 +33,12 @@ def log(msg: str) -> None:
 
 
 def resolved_path(value: str | None, fallback: Path) -> Path:
-    """Resolve a Claude plugin path while tolerating an unsubstituted value."""
     if not value or "${" in value:
         return fallback
     return Path(value).expanduser()
 
 
 def configured_value(value: str | None) -> str | None:
-    """Return a real configured value, never an empty/literal placeholder."""
     if value is None:
         return None
     stripped = value.strip()
@@ -59,7 +48,6 @@ def configured_value(value: str | None) -> str | None:
 
 
 def apply_user_config(env: dict[str, str]) -> None:
-    """Normalize Claude plugin options into FRAG's internal environment."""
     for target, option_env in USER_CONFIG_ENV.items():
         direct = configured_value(env.get(target))
         option = configured_value(env.get(option_env))
@@ -71,8 +59,6 @@ def apply_user_config(env: dict[str, str]) -> None:
         else:
             env.pop(target, None)
 
-        # The child only needs FRAG's normalized variable. Avoid retaining a
-        # second copy of sensitive values in its environment.
         env.pop(option_env, None)
 
 
