@@ -1,32 +1,7 @@
-"""
-Dependency-free MCP stdio server.
+"""Dependency-free MCP stdio server for FRAG.
 
-FRAG deliberately implements the tiny MCP surface it needs instead of
-pulling a Python MCP framework at plugin startup. The plugin runs inside
-Claude Code environments that may be sandboxed or have no PyPI access, so
-server startup must not require a network dependency install.
-
-FRAG intentionally serves the 2025-era MCP lifecycle. Current MCP clients may
-probe a stdio server with the 2026-07-28 `server/discover` method first; FRAG
-answers that probe with JSON-RPC Method not found so standards-compliant
-clients immediately fall back to the legacy `initialize` handshake. This is
-preferable to claiming 2026-era support without implementing its stateless
-per-request metadata and discovery contract.
-
-Tool surface:
-
-  frag_search(ref=None, query=..., top_k=8)
-      Resolves the ref (or pulls one out of `query` if ref is omitted),
-      syncs worktree+index, runs two-stage retrieval, returns fragments.
-
-  frag_resolve(ref)
-      Does the resolve/sync step and reports what changed without searching.
-
-  frag_status(ref)
-      Read-only: reports what's currently indexed without touching the
-      network or re-syncing.
-
-stdout is MCP JSON-RPC only. Any diagnostics belong on stderr.
+The default retrieval path is local-first when a repository hub is available:
+working clone -> bare mirror -> archive snapshot -> remote provider.
 """
 
 from __future__ import annotations
@@ -36,14 +11,13 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-from frag.hosts import KNOWN_HOSTS, get_provider, parse_ref
-from frag.resolve import _index_path  # internal but same package
-from frag.resolve import resolve
+from frag.local_sources import SOURCE_KINDS
+from frag.resolve import _index_path, _read_source_marker, resolve, resolve_index_ref
 from frag.retriever import search as run_search
 from frag.store import Store
 
 SERVER_NAME = "frag"
-SERVER_VERSION = "0.1.1"
+SERVER_VERSION = "0.2.0"
 SUPPORTED_PROTOCOL_VERSIONS = (
     "2025-11-25",
     "2025-06-18",
@@ -51,17 +25,23 @@ SUPPORTED_PROTOCOL_VERSIONS = (
     "2024-11-05",
 )
 DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
+SOURCE_ENUM = ["auto", "worktree", "mirror", "archive", "remote"]
 
 
-def frag_search(query: str, ref: str | None = None, top_k: int = 8) -> dict:
-    """Fragment a repo down to the pieces relevant to `query`. Provide `ref`
-    (e.g. 'github/CERBERUS-2.0') explicitly when known; otherwise FRAG will
-    try to find one in `query` itself."""
-    handle = resolve(ref, free_text=query if ref is None else None)
+def frag_search(
+    query: str,
+    ref: str | None = None,
+    top_k: int = 8,
+    source: str = "auto",
+) -> dict:
+    """Fragment a repo down to the pieces relevant to ``query``."""
+    handle = resolve(ref, free_text=query if ref is None else None, source=source)
     try:
         fragments = run_search(handle.store, query, top_k=top_k)
         return {
             "repo": handle.ref.key,
+            "source": handle.source_kind,
+            "source_path": str(handle.source_path),
             "sync": {
                 "accepted": handle.last_sync.accepted,
                 "rejected": handle.last_sync.rejected,
@@ -84,13 +64,18 @@ def frag_search(query: str, ref: str | None = None, top_k: int = 8) -> dict:
         handle.store.close()
 
 
-def frag_resolve(ref: str, force_full_resync: bool = False) -> dict:
-    """Sync a repo's worktree and index without searching. Returns what
-    changed on this sync."""
-    handle = resolve(ref, force_full_resync=force_full_resync)
+def frag_resolve(
+    ref: str,
+    force_full_resync: bool = False,
+    source: str = "auto",
+) -> dict:
+    """Acquire a repo source and bring its FRAG index current."""
+    handle = resolve(ref, force_full_resync=force_full_resync, source=source)
     try:
         return {
             "repo": handle.ref.key,
+            "source": handle.source_kind,
+            "source_path": str(handle.source_path),
             "worktree": str(handle.worktree),
             "accepted": handle.last_sync.accepted,
             "rejected": handle.last_sync.rejected,
@@ -103,16 +88,8 @@ def frag_resolve(ref: str, force_full_resync: bool = False) -> dict:
 
 
 def frag_status(ref: str) -> dict:
-    """Report what's currently indexed for a repo without touching the
-    network. Fails clearly if nothing has been indexed yet."""
-    parsed = parse_ref(ref, KNOWN_HOSTS)
-    if parsed is None:
-        raise ValueError(
-            f"{ref!r} does not match host[/owner]/repo grammar or names an unknown host"
-        )
-    host, owner, repo = parsed
-    provider = get_provider(host)
-    repo_ref = provider.resolve(owner, repo)
+    """Report what's currently indexed without acquiring or syncing source."""
+    repo_ref = resolve_index_ref(ref)
     index_path = _index_path(repo_ref)
     if not index_path.exists():
         return {"repo": repo_ref.key, "indexed": False}
@@ -121,22 +98,38 @@ def frag_status(ref: str) -> dict:
     try:
         known = store.all_known_paths()
         fingerprint = store.get_fingerprint()
+        marker = _read_source_marker(repo_ref)
+        source_kind = marker.split(":", 1)[0] if marker else None
         return {
             "repo": repo_ref.key,
             "indexed": True,
             "known_files": len(known),
             "embedding_fingerprint": fingerprint,
+            "source": source_kind,
+            "source_identity": marker,
         }
     finally:
         store.close()
+
+
+def _source_schema() -> dict[str, Any]:
+    return {
+        "type": "string",
+        "enum": SOURCE_ENUM,
+        "default": "auto",
+        "description": (
+            "Where repository bytes come from. auto prefers the local hub in order: "
+            "worktree, mirror, archive, then remote."
+        ),
+    }
 
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "frag_search",
         "description": (
-            "Fragment a repository down to the code relevant to a query. "
-            "Synchronizes the repo/index before searching."
+            "Fragment a repository down to code relevant to a query. Uses an existing local "
+            "repository hub before network cloning when available."
         ),
         "inputSchema": {
             "type": "object",
@@ -152,6 +145,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "maximum": 100,
                     "default": 8,
                 },
+                "source": _source_schema(),
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -159,12 +153,16 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "frag_resolve",
-        "description": "Synchronize a repository worktree and FRAG index without searching.",
+        "description": (
+            "Acquire a repository source and synchronize its FRAG index without searching. "
+            "Defaults to local-first source selection."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "ref": {"type": "string", "minLength": 1},
                 "force_full_resync": {"type": "boolean", "default": False},
+                "source": _source_schema(),
             },
             "required": ["ref"],
             "additionalProperties": False,
@@ -172,7 +170,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "frag_status",
-        "description": "Report the locally indexed status of a repository without syncing it.",
+        "description": "Report locally indexed repository status without syncing or network access.",
         "inputSchema": {
             "type": "object",
             "properties": {"ref": {"type": "string", "minLength": 1}},
@@ -226,7 +224,6 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
 
 
 def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
-    """Handle one JSON-RPC message. Notifications return None."""
     has_id = "id" in message
     request_id = message.get("id")
     method = message.get("method")
@@ -236,17 +233,12 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
 
     if method == "notifications/initialized":
         return None
-
-    # Other notifications do not require responses. Keeping this generic also
-    # makes cancellation/logging notifications harmless across MCP revisions.
     if not has_id:
         return None
 
     params = message.get("params", {})
 
     if method == "server/discover":
-        # We intentionally advertise ourselves as a legacy/2025-era server.
-        # MCP 2026-aware stdio clients use -32601 as a defined fallback signal.
         return _rpc_error(request_id, -32601, "Method not found: server/discover")
 
     if method == "initialize":
@@ -284,7 +276,7 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
             return _rpc_error(request_id, -32602, "tool arguments must be an object")
         try:
             value = TOOL_HANDLERS[name](**arguments)
-        except Exception as exc:  # tool failures are MCP CallToolResult errors
+        except Exception as exc:
             return _rpc_result(request_id, _tool_error(exc))
         return _rpc_result(request_id, _tool_result(value))
 
@@ -311,7 +303,7 @@ def main() -> None:
             continue
         try:
             response = handle_message(message)
-        except Exception as exc:  # protocol-level guardrail; tools are handled above
+        except Exception as exc:
             print(f"[frag-mcp] internal error: {type(exc).__name__}: {exc}", file=sys.stderr)
             if "id" not in message:
                 continue
