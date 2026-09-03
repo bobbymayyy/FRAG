@@ -6,7 +6,7 @@
   "author": {
     "name": "Nathan"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "keywords": ["rag", "code-search", "github", "gitea", "retrieval"],
   "userConfig": {
     "github_token": {
