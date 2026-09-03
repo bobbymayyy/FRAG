@@ -71,6 +71,12 @@ The server implements the small stdio MCP surface FRAG needs directly:
 - `frag_resolve` - sync/index without searching
 - `frag_status` - inspect an existing local index without a network sync
 
+FRAG intentionally remains on the 2025-era MCP lifecycle for now. A client
+that first probes a stdio server with the 2026 `server/discover` method gets
+JSON-RPC `-32601 Method not found`, which tells compatible clients to fall back
+to the legacy `initialize` flow. FRAG negotiates only the protocol revisions
+it actually implements instead of echoing an arbitrary future version.
+
 ## User configuration
 
 The plugin declares these `userConfig` values:
@@ -133,14 +139,22 @@ plugins/frag/
 ## Versioning and branches
 
 `plugins/frag/.claude-plugin/plugin.json` deliberately omits a `version`
-field. Claude Code can therefore resolve the effective plugin version from
-the git commit SHA instead of waiting for a manually bumped manifest version.
-The Python package version in `pyproject.toml` is only human bookkeeping.
+field. Claude Code therefore resolves the effective plugin version from the
+git commit SHA instead of waiting for a manually bumped manifest version. The
+Python package version in `pyproject.toml` is only human bookkeeping.
+
+Claude's validator reports the missing semver as a **warning**, even though
+commit-SHA versioning is supported for git marketplaces. Normal
+`claude plugin validate` passes that layout; `--strict` turns the intentional
+warning into an error. FRAG therefore uses normal canonical validation in CI
+and separately enforces its own manifest invariants in pytest, including that
+the plugin version remains absent.
 
 Both `latest` and `stable` are CI-gated. `latest` is the repository default
 and development track; `stable` can be explicitly pinned for a release-oriented
 install. A pull request into either branch runs the same Python tests,
-marketplace-launch MCP handshake, and strict plugin/marketplace validation.
+marketplace-launch MCP handshake, plugin/marketplace validation, and installer
+linting where supported.
 
 ## CI startup regression test
 
@@ -151,10 +165,13 @@ of importing `frag.mcp_server` directly:
 2. Nothing from FRAG or an MCP framework is installed into it.
 3. `PIP_NO_INDEX=1` disables package downloads.
 4. The test starts `plugins/frag/scripts/frag-server`.
-5. It completes MCP `initialize` and `tools/list` and verifies all three tools.
+5. It verifies the modern `server/discover` fallback.
+6. It starts a fresh process, completes MCP `initialize` + `tools/list`, and
+   verifies all three tools.
 
 That catches failures in the launcher, Python path setup, protocol framing,
-unconfigured `userConfig`, and accidental runtime dependency additions.
+unconfigured `userConfig`, accidental runtime dependency additions, and
+protocol-negotiation regressions.
 
 ## Local development
 
@@ -168,10 +185,10 @@ python -m pip install -e '.[dev]'
 pytest -q
 python handshake_check.py
 
-# Plugin validation
+# Plugin validation. The expected no-version warning is intentional.
 cd ../../..
-claude plugin validate ./plugins/frag --strict
-claude plugin validate . --strict
+claude plugin validate ./plugins/frag
+claude plugin validate .
 ```
 
 Changes to `.mcp.json`, `scripts/`, or `src/` require a plugin reload or a new
