@@ -6,6 +6,13 @@ pulling a Python MCP framework at plugin startup. The plugin runs inside
 Claude Code environments that may be sandboxed or have no PyPI access, so
 server startup must not require a network dependency install.
 
+FRAG intentionally serves the 2025-era MCP lifecycle. Current MCP clients may
+probe a stdio server with the 2026-07-28 `server/discover` method first; FRAG
+answers that probe with JSON-RPC Method not found so standards-compliant
+clients immediately fall back to the legacy `initialize` handshake. This is
+preferable to claiming 2026-era support without implementing its stateless
+per-request metadata and discovery contract.
+
 Tool surface:
 
   frag_search(ref=None, query=..., top_k=8)
@@ -37,7 +44,13 @@ from frag.store import Store
 
 SERVER_NAME = "frag"
 SERVER_VERSION = "0.1.1"
-DEFAULT_PROTOCOL_VERSION = "2024-11-05"
+SUPPORTED_PROTOCOL_VERSIONS = (
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+)
+DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 
 
 def frag_search(query: str, ref: str | None = None, top_k: int = 8) -> dict:
@@ -231,11 +244,20 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
 
     params = message.get("params", {})
 
+    if method == "server/discover":
+        # We intentionally advertise ourselves as a legacy/2025-era server.
+        # MCP 2026-aware stdio clients use -32601 as a defined fallback signal.
+        return _rpc_error(request_id, -32601, "Method not found: server/discover")
+
     if method == "initialize":
         if not isinstance(params, dict):
             return _rpc_error(request_id, -32602, "initialize params must be an object")
         requested = params.get("protocolVersion")
-        protocol = requested if isinstance(requested, str) and requested else DEFAULT_PROTOCOL_VERSION
+        protocol = (
+            requested
+            if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS
+            else DEFAULT_PROTOCOL_VERSION
+        )
         return _rpc_result(
             request_id,
             {
