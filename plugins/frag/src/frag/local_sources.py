@@ -11,9 +11,9 @@ Auto source order:
 
 Managed hub inputs are read-only from FRAG's point of view. Bare mirrors and
 archive snapshots are materialized under FRAG_HOME before indexing. Archive
-materialization never extracts repository source directly from the snapshot;
-it extracts the selected bare mirror to a temporary directory, then uses
-``git archive`` and a path-safe Python tar reader to produce a clean source
+materialization never indexes repository data directly from the snapshot; it
+extracts the selected bare mirror to a temporary directory, then uses
+``git archive`` plus a path-safe Python tar reader to produce a clean source
 tree.
 """
 
@@ -133,12 +133,7 @@ def _resolved_ref(host: str, owner: str | None, repo: str, remote_url: str | Non
         return None
     if owner and inferred_owner and owner != inferred_owner:
         return None
-    resolved_owner = owner or inferred_owner or _default_owner(host)
-    if not resolved_owner:
-        # The hub layout intentionally drops owner from its path. Keep local
-        # operation possible for repositories with no usable origin metadata
-        # while making the identity explicit rather than guessing a person.
-        resolved_owner = "_local"
+    resolved_owner = owner or inferred_owner or _default_owner(host) or "_local"
     return RepoRef(host=host, owner=resolved_owner, repo=repo)
 
 
@@ -166,12 +161,7 @@ def _find_worktree(hub: Path, host: str, owner: str | None, repo: str) -> LocalS
     return LocalSource(
         ref=ref,
         worktree=path,
-        sync_result=SyncResult(
-            cloned=False,
-            changed_paths=None,  # includes dirty/untracked working-tree state
-            head_before=head,
-            head_after=head,
-        ),
+        sync_result=SyncResult(False, None, head, head),
         kind="worktree",
         source_path=path,
     )
@@ -182,7 +172,6 @@ def _walk_mirror_candidates(root: Path, repo: str) -> list[Path]:
         return []
     wanted = f"{repo}.git"
     found: list[Path] = []
-    # Hub mirror layouts vary (flat, host/repo.git, host/owner/repo.git).
     # Bound traversal depth and prune bare repos so we never walk object trees.
     for current, dirs, _files in os.walk(root):
         current_path = Path(current)
@@ -231,9 +220,10 @@ def _safe_tar_member(name: str) -> PurePosixPath:
 
 
 def _extract_git_archive(git_dir: Path, target: Path) -> str:
+    """Materialize HEAD from a bare repo without preserving symlinks."""
     head = _git_head(git_dir, bare=True)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temp = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
+    temp: Path | None = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
     proc: subprocess.Popen[bytes] | None = None
     try:
         proc = subprocess.Popen(
@@ -269,13 +259,13 @@ def _extract_git_archive(git_dir: Path, target: Path) -> str:
         if target.exists():
             shutil.rmtree(target)
         os.replace(temp, target)
-        temp = Path()  # ownership transferred
+        temp = None
         return head
     finally:
         if proc is not None and proc.poll() is None:
             proc.kill()
             proc.wait()
-        if temp and temp.exists():
+        if temp is not None:
             shutil.rmtree(temp, ignore_errors=True)
 
 
@@ -334,15 +324,19 @@ def _archive_candidates(archive: Path, repo: str) -> list[str]:
     )
     if proc.returncode != 0:
         raise RuntimeError(f"could not list archive {archive.name}: {proc.stderr.strip()}")
+
     suffix = f"/{repo}.git/HEAD"
     prefixes: list[str] = []
-    for line in proc.stdout.splitlines():
-        normalized = line.strip().lstrip("./")
-        if normalized == f"{repo}.git/HEAD" or normalized.endswith(suffix):
-            prefix = normalized[:-5]  # strip '/HEAD'
-            path = PurePosixPath(prefix)
-            if not path.is_absolute() and all(part not in {"", ".", ".."} for part in path.parts):
-                prefixes.append(prefix)
+    for raw in proc.stdout.splitlines():
+        raw = raw.strip()
+        normalized = raw[2:] if raw.startswith("./") else raw
+        if normalized != f"{repo}.git/HEAD" and not normalized.endswith(suffix):
+            continue
+        raw_prefix = raw[:-5]  # strip '/HEAD' but preserve exact archive spelling
+        rel = PurePosixPath(raw_prefix)
+        if rel.is_absolute() or any(part in {"", ".."} for part in rel.parts):
+            continue
+        prefixes.append(raw_prefix)
     return prefixes
 
 
@@ -405,7 +399,8 @@ def _find_archive(
                 continue
             source_key = f"{archive.resolve()}:{archive.stat().st_mtime_ns}:{prefix}"
             target = _materialized_path(frag_home, "archive", ref)
-            meta = _read_source_meta(_source_meta_path(frag_home, "archive", ref))
+            meta_path = _source_meta_path(frag_home, "archive", ref)
+            meta = _read_source_meta(meta_path)
             if target.is_dir() and meta.get("source_key") == source_key:
                 head = str(meta.get("head") or "unknown")
                 return LocalSource(ref, target, SyncResult(False, [], head, head), "archive", archive)
@@ -435,8 +430,7 @@ def acquire_local(
 
     ``source`` may be auto/worktree/mirror/archive/remote. ``remote`` always
     returns None so the caller can invoke its HostProvider. An explicit local
-    source raises when the hub itself is unavailable rather than silently
-    going to the network.
+    source raises when unavailable rather than silently going to the network.
     """
     if source not in SOURCE_KINDS:
         raise ValueError(f"unknown source {source!r}; expected one of {sorted(SOURCE_KINDS)}")
