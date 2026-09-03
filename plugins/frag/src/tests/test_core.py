@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from frag.hosts.base import extract_ref_from_text, parse_ref
+from frag.hosts.gitutil import _redact
 from frag.indexer import Indexer
 from frag.retriever import search
 from frag.store import Store
@@ -79,6 +80,17 @@ def test_delta_sync_only_touches_changed_paths(repo: Path, store: Store) -> None
     (repo / "util.py").write_text("def add(a, b):\n    return a + b + 0\n")
     report = idx.sync(changed_paths=["util.py"])
     assert report.accepted == 1
+
+
+def test_git_error_redaction_removes_url_credentials() -> None:
+    secret = "ghp_super_secret_value"
+    message = (
+        f"git clone https://{secret}@github.com/org/repo.git failed; "
+        f"fatal: unable to access 'https://{secret}@github.com/org/repo.git/'"
+    )
+    redacted = _redact(message)
+    assert secret not in redacted
+    assert "https://***@github.com/org/repo.git" in redacted
 
 
 @pytest.mark.parametrize(
