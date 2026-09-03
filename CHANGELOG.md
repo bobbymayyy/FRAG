@@ -4,10 +4,41 @@ All notable changes to FRAG are recorded here.
 
 Note on versioning: the plugin's effective version is the **git commit SHA**,
 because `plugins/frag/.claude-plugin/plugin.json` deliberately has no
-`version` field. The version numbers below are for human bookkeeping and
-match `plugins/frag/src/pyproject.toml`; they do not drive plugin updates.
+`version` field. The version numbers below are human bookkeeping only.
 
 ## [Unreleased]
+
+## [0.2.0]
+
+### Added
+- Local-first repository acquisition. `source="auto"` now tries a repository
+  hub working clone, bare mirror, newest archive snapshot, then the existing
+  GitHub/Gitea remote provider.
+- Explicit `worktree`, `mirror`, `archive`, and `remote` source modes on
+  `frag_search` and `frag_resolve`.
+- Automatic `/srv/repos` discovery plus optional `repo_hub` / `FRAG_REPO_HUB`
+  configuration for other repository hubs.
+- Read-only mirror/archive materialization under `FRAG_HOME`; managed hub
+  directories are never modified by FRAG.
+- Source identity markers beside each index so changing source tier forces a
+  full reconciliation before delta sync resumes.
+- Search/resolve results now report the selected source and source path.
+
+### Security
+- The indexer no longer follows symlinks and only accepts regular files whose
+  resolved location remains inside the selected repository root. This blocks
+  repository symlinks from exposing unrelated local host files.
+- `git archive` materialization accepts only regular files/directories and
+  drops symlinks, hardlinks, and device entries.
+- Local origin metadata is read directly from git config text rather than by
+  invoking `git config`, so config include directives are not evaluated merely
+  to infer repository owner identity.
+
+### Changed
+- Live working clones are indexed from their current filesystem state without
+  pulling first, so dirty and untracked development changes are searchable.
+- `frag_status` can resolve local/index identity without requiring GitHub or
+  Gitea credentials.
 
 ## [0.1.1]
 
@@ -22,18 +53,11 @@ match `plugins/frag/src/pyproject.toml`; they do not drive plugin updates.
   consumes Claude Code's `CLAUDE_PLUGIN_OPTION_<KEY>` environment variables,
   so missing/unconfigured options cannot prevent the MCP process from spawning.
 - The MCP handshake test now launches the actual marketplace `frag-server`
-  path from a clean Python environment with `PIP_NO_INDEX=1` instead of
-  bypassing the launcher with `python -m frag.mcp_server`.
+  path from a clean Python environment with `PIP_NO_INDEX=1`.
 - GitHub CI now gates both `latest` and `stable`, and uses current v7 releases
-  of `actions/checkout` and `actions/setup-python` to avoid Node 20 runtime
-  deprecation warnings on hosted runners.
-- Gitea CI now mirrors validation for both `latest` and `stable` while keeping
-  conservative action majors for `act_runner` compatibility.
-- MCP search/resolve calls now close their SQLite stores after each request
-  instead of leaking connections for the lifetime of the server process.
+  of `actions/checkout` and `actions/setup-python`.
+- MCP search/resolve calls close their SQLite stores after each request.
 - Plugin license metadata now matches the repository's GPLv3 license.
-- `install.sh` now defaults to `bobbymayyy/FRAG` and no longer requires the
-  `venv` module for a runtime that does not use it.
 
 ## [0.1.0]
 
@@ -41,34 +65,11 @@ Initial release.
 
 ### Added
 - Two-stage retrieval: FTS5 candidate generation, then optional cosine
-  re-rank when an embedder is configured. Lexical-only is a fully supported
-  mode, not a degraded one.
+  re-rank when an embedder is configured.
 - Dual-host support for GitHub and Gitea via a `HostProvider` plugin slot,
-  with reference grammar `host[/owner]/repo` (e.g. `github/CERBERUS-2.0`).
-  References are accepted as an explicit argument or extracted from free text.
-- Per-repo SQLite store. One repo is one file, which makes cross-repo scope
-  leakage structurally impossible rather than something enforced by a
-  `WHERE` clause.
-- Content firewall: deny-list, magic-byte, NUL, UTF-8, and entropy checks,
-  run on every touched file on every sync rather than only at first index.
-- Delta sync driven by `git diff --name-only` between the old and new HEAD.
+  with reference grammar `host[/owner]/repo`.
+- Per-repo SQLite store.
+- Content firewall for unsafe/non-source content.
+- Delta sync driven by git changed paths.
 - MCP stdio server exposing `frag_search`, `frag_resolve`, and `frag_status`.
-- Packaged as a Claude Code plugin with a bundled `frag-retrieval` skill that
-  teaches Claude when to use retrieval instead of reading files wholesale.
-- `install.sh` with preflight checks, idempotent re-runs, ref pinning, and
-  dual-host source selection.
-- CI gate on plugin distribution branches: unit tests, a real MCP handshake,
-  and strict manifest validation.
-
-### Design decisions worth remembering
-- `chunks_fts` is a **plain** FTS5 table, not contentless. Contentless tables
-  can't be deleted from with ordinary `DELETE ... WHERE rowid`, which breaks
-  eviction.
-- Plugins validate dependencies and credentials **eagerly in `__init__`**. A
-  plugin that can't do its job must fail to construct rather than construct
-  successfully and silently degrade while reporting itself active.
-- `FRAG_HOME` lives in `${CLAUDE_PLUGIN_DATA}`, not `${CLAUDE_PLUGIN_ROOT}`.
-  The latter is version-scoped and swept after updates, so indexes stored
-  there would be wiped by plugin updates.
-- The MCP server is launched as `python3 <script>` so a lost executable bit
-  can't break the install.
+- Claude Code plugin packaging and retrieval skill.

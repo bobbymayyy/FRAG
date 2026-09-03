@@ -2,39 +2,44 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "frag",
   "displayName": "FRAG",
-  "description": "Fragment Retrieval and Generation. Indexes GitHub and Gitea repos and returns the smallest set of code fragments relevant to a symptom report, instead of sending the whole codebase.",
+  "description": "Fragment Retrieval and Generation. Searches local repository hubs first, with GitHub/Gitea fallback, and returns the smallest set of code fragments relevant to a symptom report.",
   "author": {
     "name": "Nathan"
   },
   "license": "GPL-3.0-only",
-  "keywords": ["rag", "code-search", "github", "gitea", "retrieval"],
+  "keywords": ["rag", "code-search", "github", "gitea", "retrieval", "local-repos"],
   "userConfig": {
+    "repo_hub": {
+      "type": "string",
+      "title": "Local repository hub",
+      "description": "Optional repository hub root. FRAG auto-detects /srv/repos when this is blank. Expected subdirectories include github/, gitea/, mirrors/, and archive/."
+    },
     "github_token": {
       "type": "string",
       "title": "GitHub token",
-      "description": "PAT with repo:read for the GitHub repositories FRAG should index.",
+      "description": "PAT with repo:read for GitHub repositories that are not available from the local hub.",
       "sensitive": true
     },
     "github_default_owner": {
       "type": "string",
       "title": "GitHub default owner",
-      "description": "Owner assumed when a reference omits it, e.g. 'github/CERBERUS-2.0'. Leave blank to always require an explicit owner."
+      "description": "Owner assumed when a reference omits it and local clone metadata cannot supply it."
     },
     "gitea_url": {
       "type": "string",
       "title": "Gitea URL",
-      "description": "Base URL of your Gitea instance, e.g. https://gitea.example.com"
+      "description": "Base URL of your Gitea instance, used for remote fallback and local mirror identity checking."
     },
     "gitea_token": {
       "type": "string",
       "title": "Gitea token",
-      "description": "Gitea access token with repository read access.",
+      "description": "Gitea access token used only when remote fallback is needed.",
       "sensitive": true
     },
     "gitea_default_owner": {
       "type": "string",
       "title": "Gitea default owner",
-      "description": "Owner assumed when a Gitea reference omits it. Leave blank to always require an explicit owner."
+      "description": "Owner assumed when a Gitea reference omits it and local metadata cannot supply it."
     }
   }
 }
