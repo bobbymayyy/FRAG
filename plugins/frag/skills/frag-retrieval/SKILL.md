@@ -1,36 +1,52 @@
 ---
 name: frag-retrieval
-description: "Use when investigating a bug, regression, or unexpected behavior in a GitHub or Gitea repository that is not the current working directory - especially when the user describes a symptom ('seeing X, need Y instead') and names a repo like github/CERBERUS-2.0 or gitea/infra/deploy-tools. Retrieves only the code fragments relevant to the symptom instead of reading the whole repository."
+description: "Use when investigating a bug, regression, or unexpected behavior in a GitHub or Gitea repository, especially when the user names a repo like github/CERBERUS-2.0 or gitea/AL3X. FRAG prefers an existing local repository hub, mirrors, and archives before remote cloning and retrieves only the relevant code fragments."
 ---
 
 # Finding relevant code with FRAG
 
-FRAG answers one question well: *given a description of a symptom, which
+FRAG answers one question well: *given a symptom or technical question, which
 fragments of this repository are worth looking at?* It exists so that
-investigating a bug in a large repo doesn't mean pulling the whole codebase
-into context.
+investigating a large repo does not mean pushing the whole codebase into
+context.
+
+## Source selection
+
+`frag_search` and `frag_resolve` accept a `source` option:
+
+- `auto` (default): working clone -> bare mirror -> newest archive -> remote
+- `worktree`: require the live working clone from the repository hub
+- `mirror`: require a local bare mirror; FRAG materializes HEAD into its own data directory
+- `archive`: require the newest matching `tar.zst` mirror snapshot
+- `remote`: bypass local sources and use GitHub/Gitea
+
+When `/srv/repos` exists, FRAG discovers it automatically. Another hub can be
+configured with the plugin's `repo_hub` option.
+
+Prefer the default `auto` unless the user asks for a particular source or the
+question itself is source-specific, such as "what did the archived copy have?"
+
+A live working clone is read as it exists on disk. FRAG does not pull it
+first, so dirty and untracked development changes participate in retrieval.
+Managed `mirrors/` and `archive/` inputs are never modified.
 
 ## When to use it
 
-Use `frag_search` when the user describes a problem in a repo that isn't
-the current working directory, and names it in `host[/owner]/repo` form:
+Use `frag_search` when the user describes a problem and names a repo in
+`host[/owner]/repo` form:
 
 - "Login is returning 500s intermittently in github/CERBERUS-2.0"
-- "gitea/infra/deploy-tools is retrying forever when the registry is down"
+- "gitea/AL3X is retrying forever when the registry is down"
+- "Check the archived github/STOKER snapshot for the old parser"
 
-## When NOT to use it
-
-- **The code is in the current working directory.** Use the normal Read,
-  Glob, and Grep tools. FRAG works against cloned copies of *remote* repos;
-  pointing it at the local checkout adds a clone and an index for no gain.
-- **You already know the exact file.** Read it directly.
-- **The question isn't about locating code** — architecture discussion, "how
-  does this library work", writing new code from scratch.
+If the code is already the current working directory and you know the files
+you need, ordinary Read/Glob/Grep remains cheaper. FRAG is useful when the
+question is retrieval-shaped: you need it to narrow a repository before you
+know what to open.
 
 ## How to call it
 
-Pass the user's own description of the symptom as `query`, and the repo as
-`ref`:
+Pass the user's own description as `query` and the repo as `ref`:
 
 ```
 frag_search(
@@ -39,45 +55,37 @@ frag_search(
 )
 ```
 
-Two things matter here:
+To force a historical snapshot:
 
-**Pass the symptom, not keywords.** FRAG does lexical retrieval and then, if
-embeddings are configured, semantic re-ranking. Reducing "login returns
-intermittent 500s under load" to `login` throws away the signal the second
-stage runs on. Give it the sentence.
+```
+frag_search(
+  ref="github/STOKER",
+  source="archive",
+  query="old parser behavior before the current implementation"
+)
+```
 
-**Pass `ref` explicitly when you know it.** FRAG can extract a reference
-from free text as a fallback, but that's a guess. If the user named the
-repo, put it in `ref`.
+**Pass the symptom, not just keywords.** FRAG performs lexical retrieval and
+can optionally semantic re-rank. A full description carries more signal than
+a single noun.
+
+**Pass `ref` explicitly when you know it.** Free-text reference extraction is
+a fallback, not a reason to omit a known repo reference.
 
 ## Reading the results
 
-Each fragment comes back with `path`, `start_line`, `end_line`, and a
-`score`. These are *candidates*, not answers. Normal next steps:
+Results include the selected `source` and `source_path`, followed by fragments
+with `path`, `start_line`, `end_line`, `text`, and `score`. Treat fragments as
+candidates rather than diagnoses.
 
-1. Look at the top fragments and decide which are actually implicated.
-2. If a fragment looks relevant but is missing context (you can see a
-   function's middle but not its signature), that's expected — chunks are
-   line windows. Ask FRAG again with a more specific query, or note the
-   path for the user to open.
-3. If nothing relevant comes back, say so rather than guessing. A
-   reformulated query with different vocabulary is worth one retry; beyond
-   that, tell the user FRAG didn't surface anything and ask how they'd like
-   to proceed.
-
-## Do not present fragments as a diagnosis
-
-FRAG tells you what's *textually and semantically near* the symptom
-description. That is not the same as what's causing the problem. Present
-fragments as "here's what looks related", and reason from there — don't
-assert a root cause on retrieval alone.
+1. Inspect the highest-ranked fragments and reason about which are implicated.
+2. If a relevant fragment needs surrounding context, refine the query or open the named file.
+3. If nothing useful appears, reformulate once with different vocabulary. Then report that retrieval did not surface a useful candidate rather than guessing.
 
 ## The other tools
 
-- `frag_resolve(ref)` — sync a repo's clone and index without searching.
-  Useful to pre-warm a large repo, or to check that credentials work.
-- `frag_status(ref)` — report what's indexed, without touching the network.
+- `frag_resolve(ref, source="auto")` acquires the selected source and updates its index without searching.
+- `frag_status(ref)` reports the existing index and its last source without syncing or touching the network.
 
-The first `frag_search` against a repo clones and indexes it, so it can take
-noticeably longer than subsequent ones. That's expected; don't retry
-thinking it hung.
+Local working trees are full-walk reconciled so dirty/untracked edits are
+noticed, but unchanged files are content-hash skipped and not re-chunked.
