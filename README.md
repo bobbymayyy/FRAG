@@ -1,209 +1,192 @@
 # FRAG plugin marketplace
 
-Claude Code plugin that bundles the FRAG MCP server and a retrieval skill.
-FRAG indexes GitHub and Gitea repositories and returns only the source
-fragments relevant to a symptom or question instead of pushing an entire
-codebase into the model context.
+Claude Code plugin that retrieves the smallest useful set of source fragments
+for a repository question. FRAG is local-first when a repository hub is
+available and falls back to GitHub/Gitea only when it needs to.
 
 ## Install
-
-From the GitHub marketplace:
 
 ```bash
 claude plugin marketplace add bobbymayyy/FRAG
 claude plugin install frag@frag
 ```
 
-The repository default branch is `latest`, so the shorthand above follows
-that track. To pin a branch or tag, add a ref:
+The repository default branch is `latest`. Pin the release-oriented track with:
 
 ```bash
 claude plugin marketplace add bobbymayyy/FRAG@stable
 ```
 
-For a Gitea mirror or another full git URL, use the URL form and `#<ref>`:
+A Gitea/full-URL marketplace uses `#<ref>` instead of GitHub shorthand's
+`@<ref>`.
 
-```bash
-claude plugin marketplace add https://gitea.example.com/<owner>/FRAG.git#stable
-claude plugin install frag@frag
-```
+FRAG requires Python 3.11+ and `git`. Baseline MCP startup is stdlib-only: no
+venv creation, pip install, FastMCP, or first-run network dependency download.
 
-### Or use the installer
+## Local-first repository hub
 
-`install.sh` wraps marketplace add/update plus plugin install and performs a
-small prerequisite check. It is idempotent, so running it again updates the
-registered marketplace rather than failing because it already exists.
+FRAG automatically recognizes `/srv/repos` when it exists. Another root can be
+set through the optional `repo_hub` plugin option (`FRAG_REPO_HUB` for direct
+runs).
 
-```bash
-git clone https://github.com/bobbymayyy/FRAG.git
-cd FRAG
-./install.sh
-```
-
-Options include `--ref <branch-or-tag>`, `--source gitea`, `--url <git-url>`,
-`--scope user|project|local`, and `--uninstall`.
-
-FRAG requires Python 3.11 or newer and the `git` CLI. It does **not** require
-`python3-venv`, pip, FastMCP, or a first-run dependency download.
-
-## MCP startup and sandboxing
-
-The MCP server is intentionally dependency-free at baseline. Claude Code
-starts:
+Expected hub layout:
 
 ```text
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/frag-server
+/srv/repos/
+  github/     live GitHub working clones
+  gitea/      live Gitea working clones
+  mirrors/    managed bare *.git mirrors
+  archive/    managed *.tar.zst snapshots of mirrors
 ```
 
-The launcher prepends the plugin's bundled `src/` directory to `PYTHONPATH`
-and execs `frag.mcp_server` with the same interpreter. It does not create a
-venv and it never invokes pip. That matters when Claude Code is running with
-bubblewrap or another network-restricted sandbox: the MCP server can come
-online without contacting PyPI.
+The default `source="auto"` order is:
 
-`scripts/frag-server` also keeps stdout completely reserved for MCP JSON-RPC.
-Any launcher diagnostics go to stderr so they cannot corrupt the protocol.
+1. **worktree** — use `/srv/repos/github/<repo>` or `/srv/repos/gitea/<repo>` exactly as it exists now;
+2. **mirror** — locate a matching bare mirror and materialize its HEAD under FRAG's own data directory;
+3. **archive** — locate the newest matching `tar.zst` snapshot, extract only its bare mirror to a temporary directory, then materialize HEAD under FRAG data;
+4. **remote** — use the existing GitHub/Gitea provider and credentials.
 
-The server implements the small stdio MCP surface FRAG needs directly:
-`initialize`, `ping`, `tools/list`, and `tools/call`. The advertised tools are:
+`frag_search` and `frag_resolve` can force any tier with:
 
-- `frag_search` - sync/index a repo and return the most relevant fragments
-- `frag_resolve` - sync/index without searching
-- `frag_status` - inspect an existing local index without a network sync
+```text
+source = auto | worktree | mirror | archive | remote
+```
 
-FRAG intentionally remains on the 2025-era MCP lifecycle for now. A client
-that first probes a stdio server with the 2026 `server/discover` method gets
-JSON-RPC `-32601 Method not found`, which tells compatible clients to fall back
-to the legacy `initialize` flow. FRAG negotiates only the protocol revisions
-it actually implements instead of echoing an arbitrary future version.
+Examples:
+
+```text
+frag_search(ref="github/CERBERUS-2.0", query="intermittent login 500s")
+frag_search(ref="github/STOKER", source="archive", query="old parser behavior")
+frag_resolve(ref="gitea/AL3X", source="worktree")
+```
+
+### What FRAG modifies
+
+FRAG treats the repository hub as input:
+
+- `github/` and `gitea/`: **read only from FRAG's perspective**;
+- `mirrors/`: **never modified**;
+- `archive/`: **never modified**;
+- materialized mirror/archive trees, source markers, indexes, and remote-fallback clones live under `FRAG_HOME` / `${CLAUDE_PLUGIN_DATA}`.
+
+A live working clone is deliberately **not pulled first**. Dirty and untracked
+files participate in retrieval, which makes FRAG useful while development is
+in progress. Local worktrees are full-walk reconciled on each call, but
+unchanged files are content-hash skipped rather than re-chunked.
+
+Bare mirrors and archive snapshots are converted to source with `git archive`.
+FRAG's tar reader accepts only regular files/directories and drops symlinks,
+hardlinks, and device entries.
+
+## Local filesystem safety
+
+The indexer never follows repository symlinks. Only regular files whose
+resolved path remains inside the selected repository root can be indexed.
+This prevents a repository symlink from turning local-hub access into a read
+primitive for unrelated paths such as `/srv/repos/secrets`.
+
+The normal content firewall still rejects denied paths/extensions, binary
+magic, NUL-containing data, invalid UTF-8, oversized files, and high-entropy
+binary-like content.
+
+## MCP tools
+
+- `frag_search(query, ref?, top_k=8, source="auto")` — acquire/sync/index and return ranked fragments.
+- `frag_resolve(ref, force_full_resync=false, source="auto")` — acquire/sync/index without searching.
+- `frag_status(ref)` — inspect the existing index and report its last source without syncing or touching the network.
+
+Results include `source` and `source_path`, so callers can tell whether the
+answer came from a live clone, mirror, archive, or remote fallback.
 
 ## User configuration
 
-The plugin declares these `userConfig` values:
+The plugin declares:
 
-- `github_token`
-- `github_default_owner`
-- `gitea_url`
-- `gitea_token`
-- `gitea_default_owner`
+- `repo_hub` — optional; blank auto-detects `/srv/repos`;
+- `github_token`, `github_default_owner`;
+- `gitea_url`, `gitea_token`, `gitea_default_owner`.
 
-The two token fields are marked `sensitive`, so Claude Code stores them in its
-credential storage instead of plaintext plugin settings.
+The token fields are sensitive. Claude Code stores them in credential storage
+and exports plugin options as `CLAUDE_PLUGIN_OPTION_<KEY>`; `frag-server`
+normalizes those after process spawn. Leaving every option blank does not stop
+the MCP server from connecting, and local worktree retrieval can operate with
+no GitHub/Gitea token at all.
 
-The MCP launch configuration itself does **not** interpolate
-`${user_config.*}` values. Claude Code exports configured plugin options as
-`CLAUDE_PLUGIN_OPTION_<KEY>` environment variables, and `frag-server` maps
-those into FRAG's internal environment after the process has already spawned.
-This makes configuration independent from process startup: leaving all five
-values blank does not prevent the MCP server from connecting. A host operation
-that needs missing credentials fails when that operation is called instead.
+A local clone's `remote.origin.url` is read directly from `.git/config` (not
+through `git config`, so include directives are not evaluated) to infer owner
+identity when a reference such as `github/FRAG` omits it.
 
-For example, after install this should report a connected server even before
-host credentials are configured:
+## Persistent data and source switching
 
-```bash
-claude mcp list
-```
-
-## Persistent data
-
-`${CLAUDE_PLUGIN_ROOT}` is version-scoped and changes when the plugin updates.
-`${CLAUDE_PLUGIN_DATA}` persists across updates, so `.mcp.json` sets:
+`${CLAUDE_PLUGIN_DATA}` persists across plugin updates. FRAG stores indexes,
+remote-fallback clones, and materialized mirror/archive trees beneath:
 
 ```text
 FRAG_HOME=${CLAUDE_PLUGIN_DATA}/home
 ```
 
-Repository clones and SQLite indexes therefore survive plugin updates. The
-runtime source remains in the versioned plugin cache; only state belongs in
-the persistent data directory.
+One repository remains one SQLite index. A small source marker sits beside the
+index. If a repo changes source tier, for example from a dirty local worktree
+to `source="remote"`, FRAG forces a full index reconciliation before allowing
+delta sync again. Delta paths from one tree are never applied blindly to
+another.
 
-## Why a plugin and not only a skill
+## MCP startup and sandboxing
 
-A skill is Markdown guidance. It can teach Claude when and how to retrieve
-code, but it cannot expose tools. FRAG needs a running MCP process for
-`frag_search`, `frag_resolve`, and `frag_status`.
-
-The plugin is the container for both pieces:
+Claude Code starts:
 
 ```text
-.claude-plugin/marketplace.json     marketplace catalog
-plugins/frag/
-  .claude-plugin/plugin.json        manifest + userConfig
-  .mcp.json                         MCP server registration
-  scripts/frag-server               dependency-free launcher
-  skills/frag-retrieval/SKILL.md    retrieval guidance
-  src/                              FRAG Python package + tests
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/frag-server
 ```
 
-## Versioning and branches
+The launcher prepends bundled `src/` to `PYTHONPATH` and execs the MCP module
+with the same Python interpreter. It does not invoke pip. stdout remains MCP
+JSON-RPC only; launcher diagnostics go to stderr.
 
-`plugins/frag/.claude-plugin/plugin.json` deliberately omits a `version`
-field. Claude Code therefore resolves the effective plugin version from the
-git commit SHA instead of waiting for a manually bumped manifest version. The
-Python package version in `pyproject.toml` is only human bookkeeping.
+FRAG intentionally implements the 2025-era MCP lifecycle. A newer client that
+probes `server/discover` receives `-32601 Method not found`, then can fall back
+to the supported `initialize` flow.
 
-Claude's validator reports the missing semver as a **warning**, even though
-commit-SHA versioning is supported for git marketplaces. Normal
-`claude plugin validate` passes that layout; `--strict` turns the intentional
-warning into an error. FRAG therefore uses normal canonical validation in CI
-and separately enforces its own manifest invariants in pytest, including that
-the plugin version remains absent.
+## Versioning and CI
 
-Both `latest` and `stable` are CI-gated. `latest` is the repository default
-and development track; `stable` can be explicitly pinned for a release-oriented
-install. A pull request into either branch runs the same Python tests,
-marketplace-launch MCP handshake, plugin/marketplace validation, and installer
-linting where supported.
+`plugin.json` deliberately omits `version`; git commit SHA is the effective
+marketplace version. The Python package version is bookkeeping only.
 
-## CI startup regression test
+Both `latest` and `stable` are CI-gated. The workflow runs Python tests, the
+real marketplace launcher in a clean offline runtime, canonical plugin and
+marketplace validation, and ShellCheck for the installer.
 
-The MCP smoke test intentionally exercises the production launch path instead
-of importing `frag.mcp_server` directly:
-
-1. CI creates a brand-new Python venv.
-2. Nothing from FRAG or an MCP framework is installed into it.
-3. `PIP_NO_INDEX=1` disables package downloads.
-4. The test starts `plugins/frag/scripts/frag-server`.
-5. It verifies the modern `server/discover` fallback.
-6. It starts a fresh process, completes MCP `initialize` + `tools/list`, and
-   verifies all three tools.
-
-That catches failures in the launcher, Python path setup, protocol framing,
-unconfigured `userConfig`, accidental runtime dependency additions, and
-protocol-negotiation regressions.
+Claude's validator warns when plugin semver is absent even for commit-SHA git
+marketplaces, so CI uses normal validation rather than `--strict`; pytest
+separately enforces FRAG's manifest invariants.
 
 ## Local development
 
 ```bash
-# Load directly without installing
-claude --plugin-dir ./plugins/frag
-
-# Python tests
 cd plugins/frag/src
 python -m pip install -e '.[dev]'
 pytest -q
 python handshake_check.py
 
-# Plugin validation. The expected no-version warning is intentional.
 cd ../../..
 claude plugin validate ./plugins/frag
 claude plugin validate .
 ```
 
-Changes to `.mcp.json`, `scripts/`, or `src/` require a plugin reload or a new
-Claude Code session. Editing the skill content itself can be picked up without
-rebuilding a Python environment because there is no runtime package install.
+To test against a nonstandard local hub:
+
+```bash
+FRAG_REPO_HUB=/path/to/repos FRAG_HOME=/tmp/frag-test \
+  python -m frag.mcp_server
+```
 
 ## Troubleshooting
-
-If the server shows failed:
 
 ```bash
 claude mcp list
 claude --debug mcp
 ```
 
-`frag-server` writes fatal launcher errors to stderr with a `[frag-server]`
-prefix. Once the server connects, repository-specific authentication or clone
-errors are tool-call errors rather than MCP startup failures.
+If auto source selection chooses something unexpected, force `source` to
+`worktree`, `mirror`, `archive`, or `remote`; FRAG returns the selected source
+and path in every resolve/search result.
