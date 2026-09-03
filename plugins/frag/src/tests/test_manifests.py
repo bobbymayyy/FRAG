@@ -99,13 +99,18 @@ def test_frag_home_lives_in_persistent_data_dir() -> None:
     assert "${CLAUDE_PLUGIN_ROOT}" not in env["FRAG_HOME"]
 
 
-def test_every_user_config_key_is_wired_into_mcp_env() -> None:
-    """A userConfig key that nothing reads is dead config: the user is
-    prompted for a value that never reaches the server."""
+def test_user_config_cannot_block_mcp_config_substitution() -> None:
+    """Claude exports userConfig as CLAUDE_PLUGIN_OPTION_<KEY>. Consume those
+    in the launcher rather than interpolating userConfig inside .mcp.json, so
+    an unset option cannot prevent the process from spawning."""
     declared = set(load(PLUGIN_MANIFEST)["userConfig"])
-    env_blob = json.dumps(load(MCP_CONFIG)["mcpServers"]["frag"]["env"])
+    mcp_blob = json.dumps(load(MCP_CONFIG))
+    launcher = SERVER_SCRIPT.read_text()
+
+    assert "${user_config." not in mcp_blob
     for key in declared:
-        assert f"${{user_config.{key}}}" in env_blob, f"{key} is declared but never used"
+        option_env = f"CLAUDE_PLUGIN_OPTION_{key.upper()}"
+        assert option_env in launcher, f"{key} is declared but {option_env} is not consumed"
 
 
 def test_baseline_runtime_has_no_required_pypi_dependencies() -> None:
