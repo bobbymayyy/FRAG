@@ -1,109 +1,98 @@
 #!/usr/bin/env python3
 """
-Plugin entry point. Claude Code runs this as the MCP server command.
+Claude Code plugin entry point for FRAG.
 
-Responsibilities, in order:
-  1. Make sure a venv exists in ${CLAUDE_PLUGIN_DATA} with the plugin's
-     bundled FRAG source installed into it.
-  2. exec the real MCP server out of that venv.
+The launcher is intentionally dependency-free. It does not create a venv or
+run pip: MCP startup may happen inside Claude Code's sandbox with no PyPI
+access, and a server should not need network access merely to come online.
 
-Why the venv lives in CLAUDE_PLUGIN_DATA and not CLAUDE_PLUGIN_ROOT:
-ROOT is version-scoped -- it changes on every plugin update and the old
-directory is swept ~14 days later. DATA persists across updates. Anything
-we want to survive a `git push` to stable (the venv, and more importantly
-the repo indexes themselves) has to live in DATA.
+Instead, the bundled ``src`` directory is prepended to PYTHONPATH and the MCP
+module is exec'd with the same Python interpreter Claude used to start this
+script. Repo clones and indexes still live in CLAUDE_PLUGIN_DATA so they
+persist across plugin updates.
 
-Why this script exists at all rather than a SessionStart hook: Claude Code
-auto-installs Node dependencies for plugins, but not Python ones. The
-documented alternative is to install into the persistent data directory.
-Doing it here rather than in a hook avoids depending on hook-vs-MCP-server
-startup ordering -- by construction, the venv is ready before the server
-starts, because this *is* the server's start.
+Claude Code may leave optional userConfig substitutions empty or, depending
+on client/version, pass the literal ``${user_config.foo}`` placeholder. Those
+values are scrubbed here so an unconfigured host fails clearly when its tool
+is called rather than being handed a fake credential.
 
-stdout is reserved for MCP JSON-RPC framing. Every diagnostic here goes to
-stderr; a single stray print on stdout would corrupt the protocol.
+stdout is reserved for MCP JSON-RPC framing. Diagnostics go to stderr.
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
-import subprocess
 import sys
 from pathlib import Path
+
+
+OPTIONAL_CONFIG_ENV = (
+    "FRAG_GITHUB_TOKEN",
+    "FRAG_GITHUB_DEFAULT_OWNER",
+    "FRAG_GITEA_URL",
+    "FRAG_GITEA_TOKEN",
+    "FRAG_GITEA_DEFAULT_OWNER",
+)
 
 
 def log(msg: str) -> None:
     print(f"[frag-server] {msg}", file=sys.stderr, flush=True)
 
 
-def source_fingerprint(src: Path) -> str:
-    """Hash of the bundled source tree. Used to decide whether the venv
-    needs rebuilding. A plugin update changes file contents, so the
-    fingerprint changes and we reinstall; an unchanged plugin skips the
-    install entirely and the server starts immediately."""
-    h = hashlib.sha256()
-    for path in sorted(src.rglob("*")):
-        if path.is_file() and "__pycache__" not in path.parts:
-            h.update(path.relative_to(src).as_posix().encode())
-            h.update(path.read_bytes())
-    return h.hexdigest()
+def resolved_path(value: str | None, fallback: Path) -> Path:
+    """Resolve a Claude plugin path while tolerating an unsubstituted value."""
+    if not value or "${" in value:
+        return fallback
+    return Path(value).expanduser()
 
 
-def ensure_venv(root: Path, data: Path) -> Path:
-    src = root / "src"
-    venv = data / "venv"
-    stamp = data / "installed.sha256"
-    python = venv / "bin" / "python"
-
-    want = source_fingerprint(src)
-    have = stamp.read_text().strip() if stamp.exists() else None
-
-    if python.exists() and have == want:
-        return venv  # fast path: nothing to do
-
-    log("installing FRAG into plugin data directory (first run or plugin updated)")
-    data.mkdir(parents=True, exist_ok=True)
-
-    if not python.exists():
-        subprocess.run(
-            [sys.executable, "-m", "venv", str(venv)],
-            check=True, capture_output=True, timeout=180,
-        )
-
-    subprocess.run(
-        [str(venv / "bin" / "pip"), "install", "--upgrade", "--quiet", str(src)],
-        check=True, capture_output=True, timeout=600,
-    )
-    stamp.write_text(want)
-    log("install complete")
-    return venv
+def sanitize_optional_config(env: dict[str, str]) -> None:
+    """Drop optional config values that Claude did not actually substitute."""
+    for key in OPTIONAL_CONFIG_ENV:
+        value = env.get(key)
+        if value is None:
+            continue
+        stripped = value.strip()
+        if not stripped or (
+            stripped.startswith("${user_config.") and stripped.endswith("}")
+        ):
+            env.pop(key, None)
 
 
 def main() -> int:
-    root = Path(os.environ.get("FRAG_PLUGIN_ROOT", Path(__file__).resolve().parent.parent))
-    data_env = os.environ.get("FRAG_PLUGIN_DATA")
-    if not data_env:
-        log("FRAG_PLUGIN_DATA unset; falling back to ~/.frag/plugin-data")
-        data_env = str(Path.home() / ".frag" / "plugin-data")
-    data = Path(data_env)
+    bundled_root = Path(__file__).resolve().parent.parent
+    root = resolved_path(os.environ.get("FRAG_PLUGIN_ROOT"), bundled_root)
+    data = resolved_path(
+        os.environ.get("FRAG_PLUGIN_DATA"),
+        Path.home() / ".frag" / "plugin-data",
+    )
+    src = root / "src"
 
+    if not (src / "frag" / "mcp_server.py").is_file():
+        log(f"FATAL: bundled FRAG source missing at {src}")
+        return 1
+
+    env = os.environ.copy()
+    sanitize_optional_config(env)
+
+    env["FRAG_PLUGIN_ROOT"] = str(root)
+    env["FRAG_PLUGIN_DATA"] = str(data)
+
+    frag_home = env.get("FRAG_HOME")
+    if not frag_home or "${" in frag_home:
+        env["FRAG_HOME"] = str(data / "home")
+
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(src) + (
+        os.pathsep + existing_pythonpath if existing_pythonpath else ""
+    )
+
+    argv = [sys.executable, "-m", "frag.mcp_server", *sys.argv[1:]]
     try:
-        venv = ensure_venv(root, data)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-        detail = getattr(exc, "stderr", b"") or b""
-        if isinstance(detail, bytes):
-            detail = detail.decode("utf-8", errors="replace")
-        log(f"FATAL: could not install FRAG ({exc!r}) {detail[-600:]}")
+        os.execve(sys.executable, argv, env)
+    except OSError as exc:
+        log(f"FATAL: could not exec FRAG MCP server: {exc}")
         return 1
-
-    server = venv / "bin" / "frag-mcp"
-    if not server.exists():
-        log(f"FATAL: {server} missing after install")
-        return 1
-
-    os.execv(str(server), [str(server)] + sys.argv[1:])
-    return 0  # unreachable
 
 
 if __name__ == "__main__":
