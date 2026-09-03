@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -59,14 +58,17 @@ def test_local_worktree_resolves_without_remote_credentials(
 def test_remote_mode_does_not_silently_use_local_worktree(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    hub, _frag_home = _configure_hub(monkeypatch, tmp_path)
+    hub, frag_home = _configure_hub(monkeypatch, tmp_path)
     repo = hub / "github" / "demo"
     repo.mkdir(parents=True)
     _write_origin_config(repo / ".git", "https://github.com/bobbymayyy/demo.git")
     (repo / "app.py").write_text("needle\n", encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="FRAG_GITHUB_TOKEN"):
+    # No credentials means the remote provider cannot construct. If this call
+    # accidentally used the local worktree it would succeed instead.
+    with pytest.raises(RuntimeError):
         resolve("github/bobbymayyy/demo", source="remote")
+    assert not (frag_home / "index" / "github" / "bobbymayyy" / "demo.sqlite").exists()
 
 
 def test_status_works_from_local_identity_without_credentials(
