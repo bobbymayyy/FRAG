@@ -45,42 +45,48 @@ def frag_search(query: str, ref: str | None = None, top_k: int = 8) -> dict:
     (e.g. 'github/CERBERUS-2.0') explicitly when known; otherwise FRAG will
     try to find one in `query` itself."""
     handle = resolve(ref, free_text=query if ref is None else None)
-    fragments = run_search(handle.store, query, top_k=top_k)
-    return {
-        "repo": handle.ref.key,
-        "sync": {
-            "accepted": handle.last_sync.accepted,
-            "rejected": handle.last_sync.rejected,
-            "evicted": handle.last_sync.evicted,
-            "embedding_degraded": handle.last_sync.embedding_degraded,
-            "degrade_reason": handle.last_sync.degrade_reason,
-        },
-        "fragments": [
-            {
-                "path": f.path,
-                "start_line": f.start_line,
-                "end_line": f.end_line,
-                "text": f.text,
-                "score": f.score,
-            }
-            for f in fragments
-        ],
-    }
+    try:
+        fragments = run_search(handle.store, query, top_k=top_k)
+        return {
+            "repo": handle.ref.key,
+            "sync": {
+                "accepted": handle.last_sync.accepted,
+                "rejected": handle.last_sync.rejected,
+                "evicted": handle.last_sync.evicted,
+                "embedding_degraded": handle.last_sync.embedding_degraded,
+                "degrade_reason": handle.last_sync.degrade_reason,
+            },
+            "fragments": [
+                {
+                    "path": f.path,
+                    "start_line": f.start_line,
+                    "end_line": f.end_line,
+                    "text": f.text,
+                    "score": f.score,
+                }
+                for f in fragments
+            ],
+        }
+    finally:
+        handle.store.close()
 
 
 def frag_resolve(ref: str, force_full_resync: bool = False) -> dict:
     """Sync a repo's worktree and index without searching. Returns what
     changed on this sync."""
     handle = resolve(ref, force_full_resync=force_full_resync)
-    return {
-        "repo": handle.ref.key,
-        "worktree": str(handle.worktree),
-        "accepted": handle.last_sync.accepted,
-        "rejected": handle.last_sync.rejected,
-        "evicted": handle.last_sync.evicted,
-        "embedding_degraded": handle.last_sync.embedding_degraded,
-        "degrade_reason": handle.last_sync.degrade_reason,
-    }
+    try:
+        return {
+            "repo": handle.ref.key,
+            "worktree": str(handle.worktree),
+            "accepted": handle.last_sync.accepted,
+            "rejected": handle.last_sync.rejected,
+            "evicted": handle.last_sync.evicted,
+            "embedding_degraded": handle.last_sync.embedding_degraded,
+            "degrade_reason": handle.last_sync.degrade_reason,
+        }
+    finally:
+        handle.store.close()
 
 
 def frag_status(ref: str) -> dict:
