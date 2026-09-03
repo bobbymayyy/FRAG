@@ -1,17 +1,15 @@
-# Gate for push to `stable`.
+# Mirror validation gate for the plugin distribution branches.
 #
-# With commit-SHA plugin versioning, whatever lands on `stable` is what users
-# get on their next session -- there is no separate publish step to fail
-# safely. That makes this gate the ONLY thing standing between a bad commit
-# and every session picking it up, so it runs the full suite plus the MCP
-# handshake plus manifest validation.
-name: validate-stable
+# Keep action majors conservative here for act_runner compatibility; GitHub's
+# hosted runner uses newer action majors in the primary workflow. The actual
+# FRAG tests and marketplace-launch handshake are intentionally equivalent.
+name: validate-plugin
 
 on:
   push:
-    branches: [stable]
+    branches: [latest, stable]
   pull_request:
-    branches: [stable]
+    branches: [latest, stable]
 
 jobs:
   validate:
@@ -23,7 +21,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install FRAG
+      - name: Install FRAG test dependencies
         working-directory: plugins/frag/src
         run: |
           python -m pip install --upgrade pip
@@ -33,14 +31,12 @@ jobs:
         working-directory: plugins/frag/src
         run: pytest -q
 
-      - name: MCP handshake smoke test
-        working-directory: plugins/frag/src
-        run: python handshake_check.py
+      - name: Marketplace MCP handshake in clean offline runtime
+        run: |
+          RUNTIME_DIR="$(mktemp -d)"
+          python -m venv "$RUNTIME_DIR/venv"
+          PIP_NO_INDEX=1 "$RUNTIME_DIR/venv/bin/python" plugins/frag/src/handshake_check.py
 
-      # Catches a malformed plugin.json / marketplace.json before it reaches
-      # anyone's session. --strict promotes unrecognized-field warnings to
-      # errors, which catches a misspelled or leftover manifest key. Note
-      # this means plugin.json must stay free of hand-written comment keys.
       - name: Validate plugin manifest
         run: npx --yes @anthropic-ai/claude-code plugin validate ./plugins/frag --strict
 
