@@ -14,7 +14,7 @@
 # script is not required.
 #
 # Usage:
-#   ./install.sh                              # install from the default GitHub repo
+#   ./install.sh                              # install from bobbymayyy/FRAG
 #   ./install.sh --ref v1.2.0                 # pin to a tag or branch
 #   ./install.sh --source gitea               # install from the Gitea mirror instead
 #   ./install.sh --url https://host/o/r.git   # explicit repo URL
@@ -24,7 +24,7 @@
 set -euo pipefail
 
 # --- defaults; override with flags or environment ------------------------
-GITHUB_REPO="${FRAG_GITHUB_REPO:-YOUR-GH-OWNER/FRAG}"
+GITHUB_REPO="${FRAG_GITHUB_REPO:-bobbymayyy/FRAG}"
 GITEA_URL="${FRAG_GITEA_MARKETPLACE_URL:-}"
 MARKETPLACE_NAME="frag"
 PLUGIN_NAME="frag"
@@ -92,9 +92,9 @@ if ! command -v claude >/dev/null 2>&1; then
    Install Claude Code first: https://code.claude.com/docs/en/quickstart"
 fi
 
-# FRAG's pyproject sets requires-python >=3.11. The plugin builds its venv
-# with whatever python3 is on PATH, so an older interpreter fails at install
-# time with a much less obvious message than this one.
+# FRAG runs directly from its bundled Python source. There is no first-run
+# venv or pip bootstrap, but the interpreter still needs to satisfy the
+# package's >=3.11 language/runtime requirement.
 if ! command -v python3 >/dev/null 2>&1; then
   die "python3 is required but not on PATH."
 fi
@@ -106,14 +106,7 @@ if [ "$PY_MAJOR" -lt "$MIN_PY_MAJOR" ] || \
   die "python3 is $PY_VER, but FRAG needs >= ${MIN_PY_MAJOR}.${MIN_PY_MINOR}."
 fi
 
-# venv is a separate package on some distros (notably Debian/Ubuntu), and its
-# absence is a confusing failure deep inside the plugin's first run.
-if ! python3 -c 'import venv' >/dev/null 2>&1; then
-  die "python3 is present but the venv module is missing.
-   On Debian/Ubuntu: sudo apt install python3-venv"
-fi
-
-hint "git, claude, python3 $PY_VER, venv: ok"
+hint "git, claude, python3 $PY_VER: ok"
 
 # --- uninstall -----------------------------------------------------------
 if [ "$DO_UNINSTALL" -eq 1 ]; then
@@ -165,9 +158,9 @@ info "installing $PLUGIN_NAME (scope: $SCOPE)"
 INSTALL_ARGS=(plugin install "${PLUGIN_NAME}@${MARKETPLACE_NAME}" --scope "$SCOPE")
 if [ "$ASSUME_YES" -eq 1 ]; then INSTALL_ARGS+=(-y); fi
 
-# Deliberately NOT passing tokens via --config. They'd land in shell history
-# and in the process list. Claude Code prompts for the sensitive ones at
-# enable time and stores them in the OS keychain instead.
+# Deliberately NOT passing tokens on the command line. They would land in
+# shell history and the process list. Configure sensitive plugin userConfig
+# through Claude Code's plugin settings/credential UI instead.
 claude "${INSTALL_ARGS[@]}"
 
 # --- done ----------------------------------------------------------------
@@ -176,16 +169,17 @@ cat >&2 <<EOF
 ${BOLD}FRAG installed.${RST}
 
 Next:
-  1. Claude Code will prompt for your GitHub and Gitea tokens the first time
-     the plugin is enabled. The two token fields are stored in your OS
-     keychain, not in settings.json.
+  1. FRAG's MCP server should come online even before host credentials are
+     configured. Add the GitHub/Gitea userConfig values before accessing
+     repositories that require those credentials.
   2. Start a session and try:
        "Login is throwing intermittent 500s in github/CERBERUS-2.0"
   3. The first search against a repo clones and indexes it, so it takes
      longer than later ones.
 
 Useful:
-  claude plugin details frag     what it contributes, and its token cost
+  claude mcp list                verify plugin:frag:frag is connected
+  claude plugin details frag     what the plugin contributes
   claude plugin update frag      pull the newest commit from ${SOURCE}
   ./install.sh --uninstall       remove it
 EOF
