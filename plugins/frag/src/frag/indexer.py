@@ -1,14 +1,11 @@
 """
 Indexer: walks a worktree (or a delta list of changed paths) and brings the
-Store up to date with it. Every defect class from the previous FRAG
-iteration is addressed structurally here rather than patched on top:
+Store up to date with it.
 
-  - stale eviction: any path that becomes rejected (or disappears) is fully
-    purged from files/chunks/chunks_fts/vectors, not left queryable
-  - fingerprint mismatch: if the active embedder's (name, dim) doesn't match
-    what's recorded in the store's meta table, this sync degrades to
-    lexical-only (no vector writes) rather than silently mixing vector
-    spaces
+Security invariant: FRAG indexes regular files physically contained within
+the selected repository tree. Symlinks are never followed. This matters for
+local-hub operation where a tracked or untracked symlink could otherwise make
+a repository path resolve into unrelated host data.
 """
 
 from __future__ import annotations
@@ -40,16 +37,15 @@ def _hash_text(text: str) -> str:
 class Indexer:
     def __init__(self, repo_root: Path, store: Store) -> None:
         self.repo_root = repo_root
+        self._resolved_root = repo_root.resolve()
         self.store = store
         self.chunker = LineChunker()
         self.embedder = try_get_embedder()
         self._embeddings_enabled = self._resolve_fingerprint()
 
     def _resolve_fingerprint(self) -> bool:
-        """Returns True if it's safe to write embeddings this sync."""
         stored = self.store.get_fingerprint()
         if self.embedder is None:
-            # No embedder available at all -- lexical-only, nothing to compare.
             return False
         current = (self.embedder.name, self.embedder.dim)
         if stored is None:
@@ -59,8 +55,17 @@ class Indexer:
             return False
         return True
 
+    def _is_contained_regular_file(self, path: Path) -> bool:
+        if path.is_symlink() or not path.is_file():
+            return False
+        try:
+            path.resolve().relative_to(self._resolved_root)
+        except (OSError, ValueError):
+            return False
+        return True
+
     def _iter_repo_files(self) -> list[Path]:
-        return [p for p in self.repo_root.rglob("*") if p.is_file()]
+        return [p for p in self.repo_root.rglob("*") if self._is_contained_regular_file(p)]
 
     def sync(self, changed_paths: list[str] | None = None) -> SyncReport:
         report = SyncReport()
@@ -79,19 +84,34 @@ class Indexer:
         self.store.commit()
         return report
 
+    def _reject_path(self, abs_path: Path, rel_path: str, reason: str, report: SyncReport) -> None:
+        was_known = self.store.get_file_hash(rel_path) is not None
+        if was_known:
+            report.evicted += self.store.evict_path(rel_path) or 1
+        try:
+            mtime = abs_path.lstat().st_mtime
+        except OSError:
+            mtime = 0.0
+        self.store.upsert_file(rel_path, "", mtime, "rejected", reason)
+        report.rejected += 1
+
     def _process_file(self, abs_path: Path, rel_path: str, report: SyncReport) -> None:
+        if abs_path.is_symlink():
+            self._reject_path(abs_path, rel_path, "symlink not indexed", report)
+            return
+
         if not abs_path.exists():
             if self.store.get_file_hash(rel_path) is not None:
                 report.evicted += self.store.evict_path(rel_path) or 1
             return
 
+        if not self._is_contained_regular_file(abs_path):
+            self._reject_path(abs_path, rel_path, "path is not a contained regular file", report)
+            return
+
         verdict = firewall.check(abs_path, repo_root=self.repo_root)
         if not verdict.accepted:
-            was_known = self.store.get_file_hash(rel_path) is not None
-            if was_known:
-                report.evicted += self.store.evict_path(rel_path) or 1
-            self.store.upsert_file(rel_path, "", abs_path.stat().st_mtime, "rejected", verdict.reason)
-            report.rejected += 1
+            self._reject_path(abs_path, rel_path, verdict.reason, report)
             return
 
         try:
@@ -103,7 +123,7 @@ class Indexer:
         content_hash = _hash_text(text)
         if self.store.get_file_hash(rel_path) == content_hash:
             report.accepted += 1
-            return  # unchanged, skip re-chunking
+            return
 
         chunks = self.chunker.chunk(text)
         embeddings = None
@@ -121,14 +141,15 @@ class Indexer:
     def _full_sync(self, report: SyncReport) -> None:
         seen: set[str] = set()
         for abs_path in self._iter_repo_files():
-            rel_path = str(abs_path.relative_to(self.repo_root))
-            if any(seg in firewall.DENY_PATH_SEGMENTS for seg in abs_path.relative_to(self.repo_root).parts):
+            rel = abs_path.relative_to(self.repo_root)
+            if any(seg in firewall.DENY_PATH_SEGMENTS for seg in rel.parts):
                 continue
+            rel_path = str(rel)
             seen.add(rel_path)
             self._process_file(abs_path, rel_path, report)
 
-        # Anything the store knows about that we didn't see on disk this
-        # walk has been deleted from the worktree -- evict it.
+        # A symlink is intentionally absent from the walk. Evict any older
+        # accepted row for it rather than leaving stale searchable content.
         for rel_path in self.store.all_known_paths() - seen:
             report.evicted += self.store.evict_path(rel_path) or 1
 
