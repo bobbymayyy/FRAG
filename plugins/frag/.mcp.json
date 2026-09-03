@@ -6,14 +6,7 @@
       "env": {
         "FRAG_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}",
         "FRAG_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}",
-
-        "FRAG_HOME": "${CLAUDE_PLUGIN_DATA}/home",
-
-        "FRAG_GITHUB_TOKEN": "${user_config.github_token}",
-        "FRAG_GITHUB_DEFAULT_OWNER": "${user_config.github_default_owner}",
-        "FRAG_GITEA_URL": "${user_config.gitea_url}",
-        "FRAG_GITEA_TOKEN": "${user_config.gitea_token}",
-        "FRAG_GITEA_DEFAULT_OWNER": "${user_config.gitea_default_owner}"
+        "FRAG_HOME": "${CLAUDE_PLUGIN_DATA}/home"
       }
     }
   }

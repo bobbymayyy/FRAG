@@ -1,30 +1,35 @@
-# Gate for push to `stable`.
+# Validation gate for the branches that can feed plugin installs.
 #
-# The plugin's version resolves from the git commit SHA (plugin.json has no
-# `version` field), so whatever lands on `stable` is what sessions pick up on
-# their next start. There is no publish step that could fail safely in
-# between. That makes this workflow the only thing standing between a bad
-# commit and every installed session, so it runs the full suite, a real MCP
-# handshake, and manifest validation.
-name: validate-stable
+# The repository default is `latest`, while `stable` remains the release
+# track. Because plugin.json deliberately has no version field, Claude Code
+# resolves plugin updates from git commit SHAs. Both branches therefore need
+# the same tests before bad startup code reaches an installed session.
+name: validate-plugin
 
 on:
   push:
-    branches: [stable, main]
+    branches: [latest, stable]
   pull_request:
-    branches: [stable, main]
+    branches: [latest, stable]
+
+permissions:
+  contents: read
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      # v7 action releases use the current GitHub Actions Node runtime. Older
+      # v4/v5 releases are forced from deprecated Node 20 onto Node 24 and
+      # produce noisy compatibility warnings on current runners.
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
-      - name: Install FRAG
+      - name: Install FRAG test dependencies
         working-directory: plugins/frag/src
         run: |
           python -m pip install --upgrade pip
@@ -34,22 +39,27 @@ jobs:
         working-directory: plugins/frag/src
         run: pytest -q
 
-      # Spawns the server and completes initialize + tools/list. This is the
-      # same contract a real Claude Code session exercises at startup, so a
-      # server that imports fine but can't speak MCP fails here rather than
-      # silently on someone's machine.
-      - name: MCP handshake smoke test
-        working-directory: plugins/frag/src
-        run: python handshake_check.py
+      # This intentionally does NOT use the environment above. It creates a
+      # brand-new Python runtime with no FRAG/MCP packages installed, disables
+      # PyPI, then launches the exact scripts/frag-server command used by the
+      # marketplace. A sandbox-sensitive pip/venv bootstrap regression fails
+      # here instead of on a user's machine.
+      - name: Marketplace MCP handshake in clean offline runtime
+        run: |
+          RUNTIME_DIR="$(mktemp -d)"
+          python -m venv "$RUNTIME_DIR/venv"
+          PIP_NO_INDEX=1 "$RUNTIME_DIR/venv/bin/python" plugins/frag/src/handshake_check.py
 
-      # --strict promotes unrecognized-field warnings to errors, catching a
-      # misspelled or leftover manifest key. plugin.json must therefore stay
-      # free of hand-written comment keys.
+      # Do not use --strict here. FRAG intentionally omits plugin.json version
+      # so Claude Code versions marketplace installs by git commit SHA. The
+      # official validator reports that supported design as a warning and
+      # --strict promotes the warning to an error. pytest above independently
+      # enforces FRAG's recognized-field and SHA-versioning invariants.
       - name: Validate plugin manifest
-        run: npx --yes @anthropic-ai/claude-code plugin validate ./plugins/frag --strict
+        run: npx --yes @anthropic-ai/claude-code plugin validate ./plugins/frag
 
       - name: Validate marketplace catalog
-        run: npx --yes @anthropic-ai/claude-code plugin validate . --strict
+        run: npx --yes @anthropic-ai/claude-code plugin validate .
 
       - name: Shellcheck the installer
         run: |

@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import re
+import shlex
 import subprocess
 from pathlib import Path
 
 from frag.hosts.base import SyncResult
+
+
+_URL_CREDENTIALS = re.compile(r"(?P<scheme>https?://)[^/@\s]+@", re.IGNORECASE)
+
+
+def _redact(text: str) -> str:
+    """Remove URL userinfo so a failed authenticated git command cannot
+    return a PAT through an MCP error message."""
+    return _URL_CREDENTIALS.sub(r"\g<scheme>***@", text)
 
 
 def _run(args: list[str], cwd: Path | None = None) -> str:
@@ -11,7 +22,9 @@ def _run(args: list[str], cwd: Path | None = None) -> str:
         args, cwd=cwd, capture_output=True, text=True, timeout=300, check=False
     )
     if result.returncode != 0:
-        raise RuntimeError(f"git command failed: {' '.join(args)}\n{result.stderr.strip()}")
+        command = _redact(shlex.join(args))
+        stderr = _redact(result.stderr.strip())
+        raise RuntimeError(f"git command failed: {command}\n{stderr}")
     return result.stdout.strip()
 
 
@@ -23,11 +36,12 @@ def clone_or_pull(url: str, path: Path) -> SyncResult:
     and new HEAD, so the caller can do a delta index sync instead of a full
     walk.
 
-    NOTE: the auth token is embedded in `url` for this call only. It is
-    never persisted to the repo's on-disk git config (we set the remote URL
-    without storing credentials by using it only as the fetch/clone argument,
-    not `git remote set-url`), so a stale token doesn't linger in .git/config
-    across runs.
+    NOTE: the auth token is embedded in `url` for this call only. It is never
+    persisted to the repo's on-disk git config because the credential-bearing
+    URL is supplied only to clone/fetch. `_run` redacts URL userinfo from
+    raised errors so a failed command cannot echo the token through MCP.
+    Moving credentials out of git's transient process argv entirely remains
+    a separate hardening item.
     """
     if not (path / ".git").exists():
         path.parent.mkdir(parents=True, exist_ok=True)
