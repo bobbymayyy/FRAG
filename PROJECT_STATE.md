@@ -123,6 +123,12 @@ runtime. `mcp_server.py` implements only the protocol surface FRAG needs:
 - `tools/list`
 - `tools/call`
 
+FRAG intentionally implements the 2025-era MCP lifecycle. A 2026-aware stdio
+client may probe with `server/discover` first; FRAG returns JSON-RPC `-32601`
+so compatible clients fall back to the legacy `initialize` path. The server
+negotiates only protocol revisions it actually implements rather than echoing
+an unknown future revision.
+
 Advertised tools:
 
 - `frag_search`
@@ -244,8 +250,15 @@ Tracks:
 - `stable`: explicitly pinnable release track
 
 `plugin.json` deliberately omits `version`, so plugin identity/update
-resolution can use the source git commit SHA. `pyproject.toml` currently says
+resolution uses the source git commit SHA. `pyproject.toml` currently says
 `0.1.1` for human bookkeeping only.
+
+The Claude validator reports the missing semver as a warning. Normal
+`claude plugin validate` accepts this supported commit-SHA layout, while
+`--strict` promotes the intentional warning to an error. CI therefore runs
+the canonical validator without `--strict` and uses pytest to enforce FRAG's
+own stronger manifest invariants, including recognized fields and the required
+absence of a plugin semver.
 
 ### GitHub Actions
 
@@ -258,14 +271,14 @@ It performs:
 2. editable dev install;
 3. unit tests;
 4. clean-runtime marketplace MCP handshake;
-5. strict plugin manifest validation;
-6. strict marketplace validation;
+5. plugin manifest validation;
+6. marketplace validation;
 7. shellcheck for `install.sh`.
 
 The clean-runtime handshake is the key startup invariant. CI creates a new
 venv with no FRAG/MCP packages installed, sets `PIP_NO_INDEX=1`, launches the
-real `scripts/frag-server`, completes `initialize`, and verifies all three
-FRAG tools are listed.
+real `scripts/frag-server`, verifies the modern `server/discover` fallback,
+then starts a fresh process and completes `initialize` + `tools/list`.
 
 The GitHub-hosted workflow uses `actions/checkout@v7` and
 `actions/setup-python@v7` so current runners do not have to force deprecated
@@ -296,8 +309,8 @@ compatibility with the deployed `act_runner` is verified.
 - userConfig is not interpolated in `.mcp.json`;
 - every declared option has a launcher mapping;
 - git URL credentials are redacted from raised errors;
-- production marketplace launcher completes MCP initialize/tools-list in a
-  clean offline Python environment.
+- production marketplace launcher completes modern-probe fallback plus MCP
+  initialize/tools-list in a clean offline Python environment.
 
 ### Open gaps
 
